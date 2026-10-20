@@ -31,7 +31,6 @@ import {
 import { api, desktop, pooled } from "./api";
 import {
   errorText,
-  labels,
   type History,
   type LogEntry,
   type Repo,
@@ -39,6 +38,9 @@ import {
 } from "./types";
 import { HistoryView } from "./HistoryView";
 import { Dialog } from "./Dialog";
+import { BranchDialog } from "./BranchDialog";
+import { AttentionDialog } from "./AttentionDialog";
+import { attention } from "./attention";
 import {
   applyTheme,
   initialTheme,
@@ -111,6 +113,9 @@ export default function App() {
   const [limit, setLimit] = useState(100);
   const [notice, setNotice] = useState("");
   const [adding, setAdding] = useState(false);
+  const [branchRepo, setBranchRepo] = useState<Repo | null>(null);
+  const [issuesOpen, setIssuesOpen] = useState(false);
+  const [issuesPath, setIssuesPath] = useState<string | undefined>();
   const [addError, setAddError] = useState("");
   const [addSubmitting, setAddSubmitting] = useState(false);
   const addSession = useRef(0);
@@ -310,6 +315,37 @@ export default function App() {
   );
   async function syncAll() {
     await pooled(repoRef.current, runSync);
+  }
+  async function changeBranch(
+    target: Repo,
+    reference: string,
+    create: boolean,
+  ) {
+    if (busyRef.current.has(target.path))
+      throw new Error("该仓库正在操作，请稍后重试");
+    busyRef.current.add(target.path);
+    setBusy(new Set(busyRef.current));
+    try {
+      const next = await api.switchBranch(target.path, reference, create);
+      setStatuses((old) => ({ ...old, [target.path]: next }));
+      setFailures((old) => {
+        const copy = { ...old };
+        delete copy[target.path];
+        return copy;
+      });
+    } catch (e) {
+      // A post-checkout hook can fail after Git has already switched HEAD.
+      await readStatus(target);
+      throw e;
+    } finally {
+      if (selectedRef.current === target.path) {
+        setLimit(100);
+        await loadHistory(target.path, 100);
+      }
+      await refreshLogs();
+      busyRef.current.delete(target.path);
+      setBusy(new Set(busyRef.current));
+    }
   }
   async function addPath(
     path: string,
@@ -522,10 +558,21 @@ export default function App() {
             <i className="dot synced" />
             {syncedCount} 已同步
           </span>
-          <span>
+          <button
+            className="attention-overview"
+            title="查看具体原因和未提交文件"
+            aria-haspopup="dialog"
+            disabled={issueCount === 0}
+            aria-label={`查看 ${issueCount} 个需关注仓库`}
+            onClick={() => {
+              setIssuesPath(undefined);
+              setIssuesOpen(true);
+            }}
+          >
             <i className="dot attention" />
             {issueCount} 需关注
-          </span>
+            <ChevronDown size={12} />
+          </button>
           <span className="muted">{repos.length} 个仓库</span>
         </div>
       </section>
@@ -657,15 +704,16 @@ export default function App() {
                   failed = failures[r.path],
                   loading = busy.has(r.path),
                   kind = failed ? "error" : s?.kind;
+                const info = attention(s, failed);
                 return (
                   <div
                     key={r.path}
-                    className={`repo-row ${r.path === selected ? "selected" : ""} ${loading ? "operating" : ""}`}
+                    className={`repo-row ${r.path === selected ? "selected" : ""} ${loading ? "operating" : ""} ${isIssue(r) ? "has-issue" : ""}`}
                   >
                     <button
                       className="repo-select"
                       onClick={() => setSelected(r.path)}
-                      aria-label={`查看仓库 ${r.name}，分支 ${s?.branch ?? "读取中"}，${kind ? labels[kind] : "正在读取"}，${s?.changed ?? 0} 个未提交改动，待推送 ${s?.ahead ?? 0}，待拉取 ${s?.behind ?? 0}`}
+                      aria-label={`查看仓库 ${r.name}，分支 ${s?.branch ?? "读取中"}，${info.label}，${s?.changed ?? 0} 个未提交改动，待推送 ${s?.ahead ?? 0}，待拉取 ${s?.behind ?? 0}`}
                       aria-pressed={r.path === selected}
                       title={`${r.path}\n分支：${s?.branch ?? "读取中"}\n${failed || s?.message || "正在读取状态"}\n远程更新：${s?.lastFetched ? new Date(s.lastFetched * 1000).toLocaleString("zh-CN") : "尚未获取"}`}
                     >
@@ -694,7 +742,7 @@ export default function App() {
                             ? "游离 HEAD"
                             : (s?.branch ?? "读取中…")}
                         </span>
-                        {!!s?.changed && (
+                        {!!s?.changed && !info.label.endsWith("项未提交") && (
                           <span className="changes" title="未提交改动数">
                             {s.changed} M
                           </span>
@@ -707,16 +755,9 @@ export default function App() {
                             同步中
                           </span>
                         ) : kind ? (
-                          <span
-                            className={`badge ${kind}`}
-                            title={failed || s?.message}
-                          >
+                          <span className={`badge ${kind}`} title={info.reason}>
                             <StatusIcon kind={kind} />
-                            {kind === "error" && s?.errorKind === "auth"
-                              ? "认证失败"
-                              : kind === "error" && s?.errorKind === "network"
-                                ? "网络失败"
-                                : labels[kind]}
+                            {info.label}
                           </span>
                         ) : (
                           <span className="muted">正在读取</span>
@@ -825,7 +866,16 @@ export default function App() {
                 <>
                   <ChevronRight size={13} />
                   <GitBranch size={12} />
-                  <span>{status?.branch ?? "读取中"}</span>
+                  <button
+                    className="text-btn branch-trigger"
+                    aria-label="切换分支"
+                    disabled={busy.has(repo.path)}
+                    onClick={() => setBranchRepo(repo)}
+                    title="切换或新建分支"
+                  >
+                    {status?.branch ?? "读取中"}
+                    <ChevronDown size={12} />
+                  </button>
                   <span
                     className="detail-remote-time"
                     title={
@@ -864,10 +914,19 @@ export default function App() {
                     <Activity size={13} />
                   )}
                 </span>
-                <span>
-                  {failures[selected] || status?.message || "正在检查仓库状态…"}
-                </span>
+                <span>{attention(status, failures[selected]).reason}</span>
               </div>
+              {isIssue(repo) && (
+                <button
+                  className="text-btn"
+                  onClick={() => {
+                    setIssuesPath(selected);
+                    setIssuesOpen(true);
+                  }}
+                >
+                  {status?.changed ? "查看未提交文件" : "查看处理建议"}
+                </button>
+              )}
               <button
                 className="text-btn"
                 disabled={busy.has(selected)}
@@ -921,6 +980,8 @@ export default function App() {
           </div>
           {tab === "history" ? (
             <HistoryView
+              key={selected}
+              repoPath={selected}
               history={selected ? history : emptyHistory}
               loading={historyLoading}
               error={historyError}
@@ -1024,6 +1085,34 @@ export default function App() {
             </div>
           </form>
         </Dialog>
+      )}
+      {branchRepo && (
+        <BranchDialog
+          key={branchRepo.path}
+          repo={branchRepo}
+          onClose={() => setBranchRepo(null)}
+          onSwitch={(reference, create) =>
+            changeBranch(branchRepo, reference, create)
+          }
+        />
+      )}
+      {issuesOpen && (
+        <AttentionDialog
+          key={issuesPath ?? "all"}
+          repos={repos.filter((r) =>
+            issuesPath ? r.path === issuesPath : isIssue(r),
+          )}
+          statuses={statuses}
+          failures={failures}
+          initialPath={issuesPath}
+          onClose={() => setIssuesOpen(false)}
+          onSelect={(target) => {
+            setSelected(target.path);
+            setQuery("");
+            setFilter(true);
+            setIssuesOpen(false);
+          }}
+        />
       )}
       {remove && (
         <Dialog label="移除仓库" onClose={closeRemove}>

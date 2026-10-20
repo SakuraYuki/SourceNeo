@@ -1,26 +1,21 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import {
-  GitCommitHorizontal,
-  GitMerge,
-  ChevronDown,
-  Copy,
-  Check,
-  GitBranch,
-} from "lucide-react";
+import { GitCommitHorizontal, ChevronDown, GitBranch } from "lucide-react";
 import type { Commit, History } from "./types";
 import { layoutGraph, palette, segmentPath } from "./graph";
-import { api } from "./api";
+import { CommitDetails } from "./CommitDetails";
 const ROW = 32;
 function refLabel(ref: string) {
   return ref.replace(/^refs\/(heads|remotes|tags)\//, "");
 }
 export function HistoryView({
+  repoPath,
   history,
   loading,
   error,
   onMore,
   onRetry,
 }: {
+  repoPath: string;
   history: History | null;
   loading: boolean;
   error: string;
@@ -31,7 +26,6 @@ export function HistoryView({
   const [scroll, setScroll] = useState(0);
   const [height, setHeight] = useState(400);
   const [selected, setSelected] = useState<Commit | null>(null);
-  const [copied, setCopied] = useState(false);
   const rows = useMemo(() => layoutGraph(history?.commits ?? []), [history]);
   const graphWidth = Math.max(64, ...rows.map((r) => r.width * 18 + 16));
   const showRows = !error && rows.length > 0;
@@ -47,7 +41,7 @@ export function HistoryView({
     setSelected(null);
     setScroll(0);
     if (container.current) container.current.scrollTop = 0;
-  }, [history?.commits[0]?.hash, showRows]);
+  }, [repoPath, history?.commits[0]?.hash, showRows]);
   const start = Math.max(0, Math.floor(scroll / ROW) - 8),
     end = Math.min(rows.length, Math.ceil((scroll + height) / ROW) + 8);
   return (
@@ -170,32 +164,12 @@ export function HistoryView({
         </>
       )}
       {selected && (
-        <div className="commit-detail">
-          <div>
-            <GitMerge size={15} />
-            <code>{selected.hash.slice(0, 12)}</code>
-            <button
-              className="icon-btn"
-              title="复制提交 SHA"
-              onClick={() => {
-                void api
-                  .copy(selected.hash)
-                  .then(() => {
-                    setCopied(true);
-                    setTimeout(() => setCopied(false), 1800);
-                  })
-                  .catch(() => setCopied(false));
-              }}
-            >
-              {copied ? <Check size={13} /> : <Copy size={13} />}
-            </button>
-          </div>
-          <span className="ellipsis">{selected.subject}</span>
-          <small>
-            父提交：
-            {selected.parents.map((p) => p.slice(0, 7)).join(" · ") || "根提交"}
-          </small>
-        </div>
+        <CommitDetails
+          key={`${repoPath}:${selected.hash}`}
+          repoPath={repoPath}
+          commit={selected}
+          onClose={() => setSelected(null)}
+        />
       )}
     </div>
   );

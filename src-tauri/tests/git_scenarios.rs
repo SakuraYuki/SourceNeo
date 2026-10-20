@@ -157,6 +157,12 @@ fn real_conflict_is_separate_and_writes_are_paused() {
     assert_eq!(s.kind, StatusKind::Conflict);
     assert_eq!(s.conflicts, vec!["shared.txt"]);
     assert_eq!(s.operation.as_deref(), Some("merge"));
+    assert!(f
+        .service
+        .working_changes(f.a.to_str().unwrap())
+        .unwrap()
+        .iter()
+        .any(|file| file.path == "shared.txt" && file.status == "UU"));
     let before = fs::read(f.a.join("shared.txt")).unwrap();
     assert_eq!(f.sync(&f.a).kind, StatusKind::Conflict);
     assert_eq!(g(&f.a, &["rev-parse", "HEAD"]), head);
@@ -733,6 +739,10 @@ fn read_only_git_metadata_allows_status_history_and_diagnostic() {
         let status = f.service.status(path);
         let history = f.service.history(path, 100);
         let diagnostic = f.service.diagnostic(path);
+        let branches = f.service.branches(path);
+        let working = f.service.working_changes(path);
+        let changes = f.service.commit_changes(path, &head);
+        let diff = f.service.file_diff(path, &head, "shared.txt");
         let sync = f.service.sync(path);
         fs::set_permissions(&dir, original).unwrap();
         if existing_lock {
@@ -741,6 +751,10 @@ fn read_only_git_metadata_allows_status_history_and_diagnostic() {
         assert_eq!(status.unwrap().kind, StatusKind::Synced);
         assert_eq!(history.unwrap().commits[0].hash, head);
         assert!(diagnostic.unwrap().contains(&head));
+        assert!(branches.unwrap().iter().any(|b| b.current));
+        assert!(working.unwrap().is_empty());
+        assert_eq!(changes.unwrap().files[0].path, "shared.txt");
+        assert!(diff.unwrap().contains("+base"));
         assert_eq!(sync.unwrap_err().kind, "permission");
         assert_eq!(g(&f.a, &["rev-parse", "HEAD"]), head);
         assert_eq!(g(&f.remote, &["rev-parse", "main"]), head);
@@ -1000,4 +1014,400 @@ fn existing_padded_non_directory_is_not_replaced_by_trimmed_repository() {
     assert!(error.message.contains("不是目录"));
     assert_eq!(fs::read_to_string(&file).unwrap(), "preserve existing path");
     assert_eq!(f.service.list().len(), 2);
+}
+
+#[test]
+fn branch_switching_and_creation_are_local_and_track_remote_explicitly() {
+    let f = Fixture::new();
+    let path = f.a.to_str().unwrap();
+    let remote_head = g(&f.remote, &["rev-parse", "main"]);
+    g(&f.a, &["branch", "feature/local"]);
+    let branches = f.service.branches(path).unwrap();
+    assert!(branches
+        .iter()
+        .any(|b| b.name == "main" && b.current && !b.remote));
+    assert!(branches
+        .iter()
+        .any(|b| b.reference == "refs/remotes/origin/main" && b.remote));
+    assert!(!branches.iter().any(|b| b.name == "origin/HEAD"));
+    assert_eq!(
+        f.service
+            .switch_branch(path, "refs/heads/feature/local", false)
+            .unwrap()
+            .branch,
+        "feature/local"
+    );
+    assert_eq!(
+        f.service
+            .switch_branch(path, "feature/new", true)
+            .unwrap()
+            .branch,
+        "feature/new"
+    );
+    for bad in ["--discard-changes", "bad name", "@{-1}", "HEAD"] {
+        assert!(f.service.switch_branch(path, bad, true).is_err());
+    }
+    assert_eq!(f.status(&f.a).branch, "feature/new");
+    g(&f.b, &["switch", "-c", "feature/remote"]);
+    let oid = commit(&f.b, "remote-branch.txt", "remote branch tip");
+    g(&f.b, &["push", "origin", "feature/remote"]);
+    g(&f.a, &["fetch", "origin"]);
+    let switched = f
+        .service
+        .switch_branch(path, "refs/remotes/origin/feature/remote", false)
+        .unwrap();
+    assert_eq!(switched.branch, "feature/remote");
+    assert_eq!(switched.head, oid);
+    assert_eq!(switched.upstream.as_deref(), Some("origin/feature/remote"));
+    assert!(f
+        .service
+        .switch_branch(path, "refs/remotes/origin/feature/remote", false)
+        .is_err());
+    assert_eq!(f.status(&f.a).head, oid);
+    assert_eq!(g(&f.remote, &["rev-parse", "main"]), remote_head);
+}
+
+#[test]
+fn branch_switch_refuses_dirty_operations_locks_and_occupied_worktrees() {
+    let f = Fixture::new();
+    let path = f.a.to_str().unwrap();
+    g(&f.a, &["branch", "other"]);
+    fs::write(f.a.join("shared.txt"), "precious dirty content").unwrap();
+    assert_eq!(
+        f.service
+            .switch_branch(path, "refs/heads/other", false)
+            .unwrap_err()
+            .kind,
+        "changed"
+    );
+    assert_eq!(
+        fs::read_to_string(f.a.join("shared.txt")).unwrap(),
+        "precious dirty content"
+    );
+    g(&f.a, &["restore", "shared.txt"]);
+    fs::create_dir(f.a.join(".git/rebase-merge")).unwrap();
+    assert_eq!(
+        f.service
+            .switch_branch(path, "refs/heads/other", false)
+            .unwrap_err()
+            .kind,
+        "changed"
+    );
+    fs::remove_dir(f.a.join(".git/rebase-merge")).unwrap();
+    fs::write(f.a.join(".git/index.lock"), "keep lock").unwrap();
+    assert_eq!(
+        f.service
+            .switch_branch(path, "refs/heads/other", false)
+            .unwrap_err()
+            .kind,
+        "busy"
+    );
+    assert_eq!(
+        fs::read_to_string(f.a.join(".git/index.lock")).unwrap(),
+        "keep lock"
+    );
+    fs::remove_file(f.a.join(".git/index.lock")).unwrap();
+    let linked = f.root.join("linked");
+    g(
+        &f.a,
+        &["worktree", "add", linked.to_str().unwrap(), "other"],
+    );
+    assert!(f
+        .service
+        .switch_branch(path, "refs/heads/other", false)
+        .is_err());
+    assert_eq!(f.status(&f.a).branch, "main");
+}
+
+#[test]
+fn branch_switch_does_not_overwrite_ignored_files() {
+    let f = Fixture::new();
+    g(&f.a, &["switch", "-c", "other"]);
+    commit(&f.a, "ignored.txt", "tracked on other");
+    g(&f.a, &["switch", "main"]);
+    fs::write(f.a.join(".git/info/exclude"), "ignored.txt\n").unwrap();
+    fs::write(f.a.join("ignored.txt"), "precious ignored content").unwrap();
+    assert!(f
+        .service
+        .switch_branch(f.a.to_str().unwrap(), "refs/heads/other", false)
+        .is_err());
+    assert_eq!(
+        fs::read_to_string(f.a.join("ignored.txt")).unwrap(),
+        "precious ignored content"
+    );
+    assert_eq!(f.status(&f.a).branch, "main");
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_post_checkout_hook_reports_error_after_branch_has_changed() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let path = f.a.to_str().unwrap();
+    g(&f.a, &["switch", "-c", "feature"]);
+    let feature_head = commit(&f.a, "feature.txt", "feature content\n");
+    g(&f.a, &["switch", "main"]);
+    let remote_head = g(&f.remote, &["rev-parse", "main"]);
+    let hook = f.a.join(".git/hooks/post-checkout");
+    fs::write(
+        &hook,
+        "#!/bin/sh\necho 'post-checkout failed' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let error = f
+        .service
+        .switch_branch(path, "refs/heads/feature", false)
+        .unwrap_err();
+    assert!(error.message.contains("post-checkout failed"));
+    let actual = f.service.status(path).unwrap();
+    assert_eq!(actual.branch, "feature");
+    assert_eq!(actual.head, feature_head);
+    assert_eq!(actual.changed, 0);
+    assert!(f
+        .service
+        .branches(path)
+        .unwrap()
+        .iter()
+        .any(|b| b.name == "feature" && b.current));
+    assert_eq!(
+        fs::read_to_string(f.a.join("feature.txt")).unwrap(),
+        "feature content\n"
+    );
+    assert_eq!(g(&f.remote, &["rev-parse", "main"]), remote_head);
+}
+
+#[test]
+fn commit_files_and_diffs_handle_root_rename_delete_binary_and_literal_paths() {
+    let f = Fixture::new();
+    let path = f.a.to_str().unwrap();
+    let root = g(&f.a, &["rev-parse", "HEAD"]);
+    let changes = f.service.commit_changes(path, &root).unwrap();
+    assert!(changes.parent.is_none());
+    assert_eq!(changes.files.len(), 1);
+    assert_eq!(changes.files[0].status, "A");
+    assert!(f
+        .service
+        .file_diff(path, &root, "shared.txt")
+        .unwrap()
+        .contains("+base"));
+    g(&f.a, &["mv", "shared.txt", "renamed 文件.txt"]);
+    fs::write(f.a.join("binary.dat"), [0, 255, 0, 1]).unwrap();
+    let literal = if cfg!(windows) {
+        "[literal].txt"
+    } else {
+        ":(glob)*.txt"
+    };
+    fs::write(f.a.join(literal), "literal change\n").unwrap();
+    #[cfg(unix)]
+    fs::write(f.a.join("line\nbreak.txt"), "newline filename\n").unwrap();
+    g(&f.a, &["add", "--all"]);
+    g(
+        &f.a,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "rename and binary",
+        ],
+    );
+    let hash = g(&f.a, &["rev-parse", "HEAD"]);
+    let changes = f.service.commit_changes(path, &hash).unwrap();
+    #[cfg(unix)]
+    {
+        assert!(changes
+            .files
+            .iter()
+            .any(|file| file.path == "line\nbreak.txt"));
+        assert!(f
+            .service
+            .file_diff(path, &hash, "line\nbreak.txt")
+            .unwrap()
+            .contains("+newline filename"));
+    }
+    assert_eq!(changes.parent.as_deref(), Some(root.as_str()));
+    let renamed = changes
+        .files
+        .iter()
+        .find(|file| file.path == "renamed 文件.txt")
+        .unwrap();
+    assert!(renamed.status.starts_with('R'));
+    assert_eq!(renamed.old_path.as_deref(), Some("shared.txt"));
+    assert!(f
+        .service
+        .file_diff(path, &hash, &renamed.path)
+        .unwrap()
+        .contains("rename from shared.txt"));
+    assert!(f
+        .service
+        .file_diff(path, &hash, "binary.dat")
+        .unwrap()
+        .contains("Binary files"));
+    let diff = f.service.file_diff(path, &hash, literal).unwrap();
+    assert!(diff.contains("+literal change"));
+    assert!(!diff.contains("binary.dat"));
+    assert!(f.service.file_diff(path, &hash, "not-in-commit").is_err());
+    assert!(f.service.commit_changes(path, "--all").is_err());
+    let blob = g(&f.a, &["rev-parse", "HEAD:binary.dat"]);
+    assert!(f.service.commit_changes(path, &blob).is_err());
+    fs::write(f.a.join(literal), "dirty worktree must remain").unwrap();
+    assert!(f
+        .service
+        .file_diff(path, &hash, literal)
+        .unwrap()
+        .contains("+literal change"));
+    assert_eq!(
+        fs::read_to_string(f.a.join(literal)).unwrap(),
+        "dirty worktree must remain"
+    );
+    g(&f.a, &["rm", "binary.dat"]);
+    g(
+        &f.a,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "delete binary",
+        ],
+    );
+    let deleted = g(&f.a, &["rev-parse", "HEAD"]);
+    assert!(f
+        .service
+        .commit_changes(path, &deleted)
+        .unwrap()
+        .files
+        .iter()
+        .any(|file| file.path == "binary.dat" && file.status == "D"));
+    assert!(f
+        .service
+        .file_diff(path, &deleted, "binary.dat")
+        .unwrap()
+        .contains("deleted file mode"));
+}
+
+#[test]
+fn merge_changes_compare_first_parent_and_never_run_external_diff() {
+    let f = Fixture::new();
+    g(&f.a, &["switch", "-c", "side"]);
+    commit(&f.a, "side.txt", "side only");
+    g(&f.a, &["switch", "main"]);
+    let parent = commit(&f.a, "main.txt", "main only");
+    g(
+        &f.a,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "merge",
+            "--no-ff",
+            "side",
+            "-m",
+            "merge side",
+        ],
+    );
+    let hash = g(&f.a, &["rev-parse", "HEAD"]);
+    g(
+        &f.a,
+        &[
+            "config",
+            "diff.external",
+            "sourceneo-command-that-must-never-run",
+        ],
+    );
+    g(&f.a, &["config", "diff.relative", "true"]);
+    fs::write(f.a.join(".git/info/attributes"), "*.txt diff=review\n").unwrap();
+    g(
+        &f.a,
+        &[
+            "config",
+            "diff.review.textconv",
+            "sourceneo-command-that-must-never-run",
+        ],
+    );
+    g(
+        &f.a,
+        &[
+            "config",
+            "diff.review.command",
+            "sourceneo-command-that-must-never-run",
+        ],
+    );
+    let path = f.a.to_str().unwrap();
+    let changes = f.service.commit_changes(path, &hash).unwrap();
+    assert_eq!(changes.parent.as_deref(), Some(parent.as_str()));
+    assert_eq!(changes.files.len(), 1);
+    assert_eq!(changes.files[0].path, "side.txt");
+    assert!(f
+        .service
+        .file_diff(path, &hash, "side.txt")
+        .unwrap()
+        .contains("+side only"));
+}
+
+#[test]
+fn shallow_commit_details_do_not_mislabel_missing_parents_as_a_root_commit() {
+    let f = Fixture::new();
+    commit(&f.a, "second.txt", "second commit");
+    g(&f.a, &["push"]);
+    let shallow = f.root.join("shallow-details");
+    let normalized = f.remote.to_string_lossy().replace('\\', "/");
+    let url = format!("file:///{}", normalized.trim_start_matches('/'));
+    g(
+        &f.root,
+        &["clone", "--depth", "1", &url, shallow.to_str().unwrap()],
+    );
+    let repo = f.service.add(shallow.to_str().unwrap()).unwrap();
+    let head = g(&shallow, &["rev-parse", "HEAD"]);
+    assert!(f.service.commit_changes(&repo.path, &head).is_err());
+    assert_eq!(g(&shallow, &["rev-parse", "HEAD"]), head);
+    assert_eq!(g(&shallow, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn working_files_preserve_stage_state_renames_and_untracked_paths_without_writes() {
+    let f = Fixture::new();
+    commit(&f.a, "old.txt", "rename content");
+    commit(&f.a, "keep.txt", "keep the worktree copy");
+    g(&f.a, &["rm", "--cached", "keep.txt"]);
+    g(&f.a, &["mv", "old.txt", "新 文件.txt"]);
+    fs::write(f.a.join("shared.txt"), "staged content\n").unwrap();
+    g(&f.a, &["add", "shared.txt"]);
+    fs::write(f.a.join("shared.txt"), "unstaged content\n").unwrap();
+    fs::create_dir(f.a.join("untracked")).unwrap();
+    fs::write(f.a.join("untracked/one.txt"), "one").unwrap();
+    fs::write(f.a.join("untracked/two.txt"), "two").unwrap();
+    #[cfg(unix)]
+    fs::write(f.a.join("line\nbreak.txt"), "newline").unwrap();
+    let head = g(&f.a, &["rev-parse", "HEAD"]);
+    let index = fs::read(f.a.join(".git/index")).unwrap();
+    let files = f.service.working_changes(f.a.to_str().unwrap()).unwrap();
+    assert!(files
+        .iter()
+        .any(|file| file.path == "keep.txt" && file.status == "D "));
+    assert!(files
+        .iter()
+        .any(|file| file.path == "keep.txt" && file.status == "??"));
+    assert!(files
+        .iter()
+        .any(|file| file.path == "shared.txt" && file.status == "MM"));
+    assert!(files.iter().any(|file| file.path == "新 文件.txt"
+        && file.status == "R "
+        && file.old_path.as_deref() == Some("old.txt")));
+    for path in ["untracked/one.txt", "untracked/two.txt"] {
+        assert!(files
+            .iter()
+            .any(|file| file.path == path && file.status == "??"));
+    }
+    #[cfg(unix)]
+    assert!(files
+        .iter()
+        .any(|file| file.path == "line\nbreak.txt" && file.status == "??"));
+    assert_eq!(fs::read(f.a.join(".git/index")).unwrap(), index);
+    assert_eq!(
+        fs::read_to_string(f.a.join("shared.txt")).unwrap(),
+        "unstaged content\n"
+    );
+    assert_eq!(g(&f.a, &["rev-parse", "HEAD"]), head);
 }

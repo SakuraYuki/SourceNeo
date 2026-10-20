@@ -2,7 +2,15 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { Repo, RepoStatus, History, LogEntry } from "./types";
+import type {
+  Repo,
+  RepoStatus,
+  History,
+  LogEntry,
+  Branch,
+  CommitChanges,
+  ChangedFile,
+} from "./types";
 export const desktop = isTauri();
 export const api = {
   theme: (theme: "light" | "dark") =>
@@ -14,6 +22,15 @@ export const api = {
   history: (path: string, limit: number) =>
     invoke<History>("repo_history", { path, limit }),
   sync: (path: string) => invoke<RepoStatus>("sync_repo", { path }),
+  branches: (path: string) => invoke<Branch[]>("repo_branches", { path }),
+  workingChanges: (path: string) =>
+    invoke<ChangedFile[]>("working_changes", { path }),
+  switchBranch: (path: string, reference: string, create = false) =>
+    invoke<RepoStatus>("switch_branch", { path, reference, create }),
+  changes: (path: string, hash: string) =>
+    invoke<CommitChanges>("commit_changes", { path, hash }),
+  diff: (path: string, hash: string, file: string) =>
+    invoke<string>("file_diff", { path, hash, file }),
   logs: () =>
     desktop ? invoke<LogEntry[]>("operation_logs") : Promise.resolve([]),
   diagnostic: (path: string) => invoke<string>("copy_diagnostic", { path }),

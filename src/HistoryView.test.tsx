@@ -24,6 +24,7 @@ afterEach(() => {
 describe("history virtualization", () => {
   it("restores visible rows and observes the new container after a failed refresh", () => {
     const props = {
+      repoPath: "/test/repo",
       history: makeHistory(300),
       loading: false,
       error: "",
@@ -55,6 +56,7 @@ describe("history virtualization", () => {
 
   it("keeps the scroll position when another page is appended", () => {
     const props = {
+      repoPath: "/test/repo",
       history: makeHistory(200),
       loading: false,
       error: "",

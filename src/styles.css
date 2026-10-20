@@ -266,6 +266,97 @@ input::placeholder {
   font-size: 12px;
   gap: 14px;
 }
+.attention-overview {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 5px;
+  min-height: 22px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--warning);
+  font-size: 12px;
+}
+.attention-overview:hover:not(:disabled) {
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+}
+.modal.attention-modal {
+  width: 660px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+.attention-items {
+  overflow: auto;
+  min-height: 0;
+  margin-top: 12px;
+}
+.attention-item {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.attention-item-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--warning);
+}
+.attention-item-heading strong {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.attention-item p {
+  margin: 6px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.attention-item .attention-branch {
+  font-size: 11px;
+  color: var(--faint);
+}
+.attention-item .attention-action {
+  color: var(--text);
+}
+.attention-actions {
+  display: flex;
+  gap: 12px;
+}
+.working-files {
+  background: var(--subtle);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-top: 8px;
+  padding: 8px;
+}
+.working-files ul {
+  list-style: none;
+  padding: 0;
+  margin: 6px 0;
+  max-height: 220px;
+  overflow: auto;
+}
+.working-files li {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) 52px;
+  gap: 6px;
+  align-items: start;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.working-files li > span {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.working-label,
+.working-files small,
+.working-files code {
+  color: var(--muted);
+}
+.repo-summary > button {
+  flex-shrink: 0;
+}
 .overview-stats > span {
   display: flex;
   align-items: center;
@@ -616,6 +707,9 @@ input::placeholder {
 .side .branch {
   flex: 0 2 auto;
   max-width: 96px;
+}
+.side .repo-row.has-issue .branch {
+  max-width: 64px;
 }
 .side .status-cell {
   flex: 0 0 auto;
@@ -1001,33 +1095,6 @@ code {
   color: var(--muted);
   height: 100px;
 }
-.commit-detail {
-  border-top: 1px solid var(--border);
-  padding: 4px 10px;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  background: var(--raised);
-  min-height: 34px;
-}
-.commit-detail > div {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--accent);
-}
-.commit-detail code {
-  font-size: 12px;
-}
-.commit-detail > span {
-  font-size: 12px;
-}
-.commit-detail > small {
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 11px;
-  white-space: nowrap;
-}
 .log-list {
   flex: 1;
   overflow: auto;
@@ -1175,6 +1242,180 @@ footer > span {
   background: var(--backdrop);
   backdrop-filter: blur(4px);
 }
+.branch-trigger {
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.branch-modal {
+  width: 560px;
+}
+.inspector-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.inspector-heading h2 {
+  margin: 0;
+}
+.inspector-heading > strong {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+.branch-list {
+  max-height: 40vh;
+  overflow: auto;
+}
+.branch-list h3 {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 12px 0 4px;
+}
+.branch-list section > button {
+  width: 100%;
+  justify-content: flex-start;
+  border: 0;
+  border-radius: 3px;
+  min-height: 30px;
+  padding: 4px 8px;
+}
+.branch-list button span {
+  flex: 1;
+  text-align: left;
+}
+.branch-list button small {
+  color: var(--muted);
+}
+.new-branch {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+.new-branch label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.new-branch > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.new-branch input {
+  margin: 0;
+  min-width: 0;
+}
+.new-branch button {
+  flex-shrink: 0;
+}
+.commit-inspector {
+  flex: 0 1 45%;
+  min-height: 155px;
+  max-height: 360px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border-strong);
+  background: var(--panel);
+  overflow: hidden;
+}
+.commit-inspector > .inspector-heading {
+  padding: 3px 8px;
+  flex-shrink: 0;
+}
+.comparison-note {
+  color: var(--muted);
+  background: var(--subtle);
+  font-size: 11px;
+  padding: 4px 8px;
+  margin: 0;
+  flex-shrink: 0;
+}
+.commit-files-layout {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(140px, 28%) minmax(0, 1fr);
+}
+.changed-files {
+  overflow: auto;
+  border-right: 1px solid var(--border);
+}
+.changed-files button {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  text-align: left;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.changed-files button[aria-pressed="true"] {
+  background: var(--selected);
+  color: var(--accent);
+}
+.changed-files button > span:last-child {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.changed-files small {
+  color: var(--muted);
+}
+.file-status {
+  font-family: monospace;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.status-A {
+  color: var(--success);
+}
+.status-D {
+  color: var(--error);
+}
+.file-patch {
+  min-width: 0;
+  overflow: auto;
+}
+.file-patch pre {
+  margin: 0;
+  padding: 8px;
+  font:
+    12px/1.6 "SFMono-Regular",
+    Consolas,
+    monospace;
+  tab-size: 4;
+  color: var(--text);
+}
+.file-patch pre > span {
+  display: block;
+  min-height: 1.6em;
+  width: max-content;
+  min-width: 100%;
+}
+.diff-add {
+  color: var(--success);
+  background: var(--success-bg);
+}
+.diff-delete {
+  color: var(--error);
+  background: var(--error-bg);
+}
+.diff-hunk {
+  color: var(--accent);
+  background: var(--raised);
+}
+.inspector-message {
+  font-size: 12px;
+  padding: 8px;
+  margin: 0;
+  overflow: auto;
+}
 .spin {
   animation: spin 1.3s linear infinite;
 }
@@ -1190,9 +1431,6 @@ footer > span {
   .safety {
     display: none;
   }
-  .commit-detail > small {
-    display: none;
-  }
 }
 @media (max-width: 800px) {
   .graph-legend {
@@ -1206,6 +1444,9 @@ footer > span {
   }
 }
 @media (max-height: 650px) {
+  .commit-inspector {
+    min-height: 110px;
+  }
   .workspace-heading {
     padding: 6px 0;
   }

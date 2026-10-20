@@ -59,6 +59,28 @@ pub struct History {
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Branch {
+    pub reference: String,
+    pub name: String,
+    pub remote: bool,
+    pub current: bool,
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedFile {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub status: String,
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitChanges {
+    pub hash: String,
+    pub parent: Option<String>,
+    pub files: Vec<ChangedFile>,
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LogEntry {
     pub time: u64,
     pub path: String,

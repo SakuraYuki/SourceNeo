@@ -471,3 +471,182 @@ pub fn history(repo: &Repo, limit: usize) -> Result<History> {
         shallow,
     })
 }
+
+pub fn branches(repo: &Repo) -> Result<Vec<Branch>> {
+    let raw = run(
+        Path::new(&repo.path),
+        &[
+            "for-each-ref",
+            "--sort=refname",
+            "--format=%(refname)%00%(symref)%00%(HEAD)",
+            "refs/heads/",
+            "refs/remotes/",
+        ],
+    )?;
+    Ok(raw
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split('\0').collect();
+            if fields.len() != 3 || !fields[1].is_empty() {
+                return None;
+            }
+            let remote = fields[0].starts_with("refs/remotes/");
+            Some(Branch {
+                reference: fields[0].into(),
+                name: fields[0]
+                    .strip_prefix(if remote {
+                        "refs/remotes/"
+                    } else {
+                        "refs/heads/"
+                    })?
+                    .into(),
+                remote,
+                current: fields[2] == "*",
+            })
+        })
+        .collect())
+}
+
+pub fn working_changes(repo: &Repo) -> Result<Vec<ChangedFile>> {
+    let raw = run(
+        Path::new(&repo.path),
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
+    let mut records = raw.split_terminator('\0');
+    let mut files = Vec::new();
+    while let Some(record) = records.next() {
+        let status = record
+            .get(..2)
+            .ok_or_else(|| GitError::new("parse", "工作区状态格式无效"))?;
+        let path = record
+            .get(3..)
+            .ok_or_else(|| GitError::new("parse", "工作区路径格式无效"))?;
+        let old_path = if status.contains(['R', 'C']) {
+            Some(
+                records
+                    .next()
+                    .ok_or_else(|| GitError::new("parse", "工作区重命名格式无效"))?
+                    .into(),
+            )
+        } else {
+            None
+        };
+        files.push(ChangedFile {
+            path: path.into(),
+            old_path,
+            status: status.into(),
+        });
+    }
+    Ok(files)
+}
+
+fn commit_pair(repo: &Repo, hash: &str) -> Result<(String, Option<String>)> {
+    if !matches!(hash.len(), 40 | 64) || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(GitError::new("revision", "请选择有效的完整提交 SHA"));
+    }
+    let oid = run(
+        Path::new(&repo.path),
+        &["rev-parse", "--verify", &format!("{hash}^{{commit}}")],
+    )?;
+    let oid = oid.trim().to_string();
+    // Read real parent headers: rev-list hides parents at a shallow boundary.
+    let raw = run(Path::new(&repo.path), &["cat-file", "commit", &oid])?;
+    let parent = raw
+        .lines()
+        .take_while(|line| !line.is_empty())
+        .find_map(|line| line.strip_prefix("parent ").map(String::from));
+    if parent.as_ref().is_some_and(|parent| {
+        parent.len() != oid.len() || !parent.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err(GitError::new("revision", "提交的父对象 SHA 格式无效"));
+    }
+    Ok((oid, parent))
+}
+
+fn tree_diff(
+    repo: &Repo,
+    hash: &str,
+    parent: Option<&str>,
+    options: &[&str],
+    paths: &[&str],
+) -> Result<String> {
+    let mut args = vec![
+        "--literal-pathspecs",
+        "diff-tree",
+        "--root",
+        "-r",
+        "--no-commit-id",
+        "--find-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--no-relative",
+    ];
+    args.extend_from_slice(options);
+    if let Some(parent) = parent {
+        args.push(parent);
+    }
+    args.push(hash);
+    args.push("--");
+    args.extend_from_slice(paths);
+    run(Path::new(&repo.path), &args)
+}
+
+pub fn commit_changes(repo: &Repo, hash: &str) -> Result<CommitChanges> {
+    let (hash, parent) = commit_pair(repo, hash)?;
+    let raw = tree_diff(
+        repo,
+        &hash,
+        parent.as_deref(),
+        &["--name-status", "-z"],
+        &[],
+    )?;
+    let mut fields = raw.split_terminator('\0');
+    let mut files = Vec::new();
+    while let Some(status) = fields.next() {
+        let first = fields
+            .next()
+            .ok_or_else(|| GitError::new("parse", "文件列表格式无效"))?;
+        let renamed = status.starts_with('R') || status.starts_with('C');
+        let (old_path, path) = if renamed {
+            (
+                Some(first.into()),
+                fields
+                    .next()
+                    .ok_or_else(|| GitError::new("parse", "重命名文件格式无效"))?,
+            )
+        } else {
+            (None, first)
+        };
+        files.push(ChangedFile {
+            path: path.into(),
+            old_path,
+            status: status.into(),
+        });
+    }
+    Ok(CommitChanges {
+        hash,
+        parent,
+        files,
+    })
+}
+
+pub fn file_diff(repo: &Repo, hash: &str, path: &str) -> Result<String> {
+    let changes = commit_changes(repo, hash)?;
+    let file = changes
+        .files
+        .iter()
+        .find(|file| file.path == path)
+        .ok_or_else(|| GitError::new("path", "该文件不在此提交的变更列表中"))?;
+    let mut paths = vec![file.path.as_str()];
+    if let Some(old) = &file.old_path {
+        paths.push(old);
+    }
+    tree_diff(
+        repo,
+        &changes.hash,
+        changes.parent.as_deref(),
+        &["--patch", "--src-prefix=a/", "--dst-prefix=b/"],
+        &paths,
+    )
+}

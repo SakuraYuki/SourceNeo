@@ -47,6 +47,22 @@ export interface LogEntry {
   level: string;
   message: string;
 }
+export interface Branch {
+  reference: string;
+  name: string;
+  remote: boolean;
+  current: boolean;
+}
+export interface ChangedFile {
+  path: string;
+  oldPath: string | null;
+  status: string;
+}
+export interface CommitChanges {
+  hash: string;
+  parent: string | null;
+  files: ChangedFile[];
+}
 export const labels: Record<Kind, string> = {
   synced: "已同步",
   ahead: "待推送",

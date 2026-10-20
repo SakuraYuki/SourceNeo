@@ -46,6 +46,45 @@ mod desktop {
         blocking(move || s.sync(&path)).await
     }
     #[tauri::command]
+    pub async fn repo_branches(state: Backend<'_>, path: String) -> Result<Vec<Branch>> {
+        let s = state.inner().clone();
+        blocking(move || s.branches(&path)).await
+    }
+    #[tauri::command]
+    pub async fn working_changes(state: Backend<'_>, path: String) -> Result<Vec<ChangedFile>> {
+        let s = state.inner().clone();
+        blocking(move || s.working_changes(&path)).await
+    }
+    #[tauri::command]
+    pub async fn switch_branch(
+        state: Backend<'_>,
+        path: String,
+        reference: String,
+        create: bool,
+    ) -> Result<RepoStatus> {
+        let s = state.inner().clone();
+        blocking(move || s.switch_branch(&path, &reference, create)).await
+    }
+    #[tauri::command]
+    pub async fn commit_changes(
+        state: Backend<'_>,
+        path: String,
+        hash: String,
+    ) -> Result<CommitChanges> {
+        let s = state.inner().clone();
+        blocking(move || s.commit_changes(&path, &hash)).await
+    }
+    #[tauri::command]
+    pub async fn file_diff(
+        state: Backend<'_>,
+        path: String,
+        hash: String,
+        file: String,
+    ) -> Result<String> {
+        let s = state.inner().clone();
+        blocking(move || s.file_diff(&path, &hash, &file)).await
+    }
+    #[tauri::command]
     pub async fn operation_logs(state: Backend<'_>) -> Result<Vec<LogEntry>> {
         let s = state.inner().clone();
         blocking(move || Ok(s.logs())).await
@@ -93,6 +132,11 @@ mod desktop {
                 repo_status,
                 repo_history,
                 sync_repo,
+                repo_branches,
+                working_changes,
+                switch_branch,
+                commit_changes,
+                file_diff,
                 operation_logs,
                 copy_diagnostic
             ])

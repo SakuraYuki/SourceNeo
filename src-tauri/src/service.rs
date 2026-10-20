@@ -38,7 +38,7 @@ impl Gate {
 
 enum Access {
     ReadOnly,
-    Sync,
+    Write,
 }
 
 pub struct Service {
@@ -156,8 +156,8 @@ impl Service {
         let _guard = lock.lock().unwrap();
         let _permit = self.gate.enter();
         // Reads stay serialized inside this process but never require writing Git metadata.
-        // Only sync mutates Git state and needs the cross-process application lock.
-        let _file = if matches!(access, Access::Sync) {
+        // Sync and branch switching mutate Git state and need the cross-process application lock.
+        let _file = if matches!(access, Access::Write) {
             let file = OpenOptions::new()
                 .create(true)
                 .truncate(false)
@@ -171,7 +171,7 @@ impl Service {
                         } else {
                             "io"
                         },
-                        format!("无法打开同步锁：{e}"),
+                        format!("无法打开仓库操作锁：{e}"),
                     )
                 })?;
             file.try_lock_exclusive().map_err(|_| {
@@ -210,6 +210,62 @@ impl Service {
     pub fn history(&self, path: &str, limit: usize) -> Result<History> {
         self.with_repo(path, Access::ReadOnly, |repo| {
             git::history(repo, limit.clamp(1, 5000))
+        })
+    }
+    pub fn branches(&self, path: &str) -> Result<Vec<Branch>> {
+        self.with_repo(path, Access::ReadOnly, git::branches)
+    }
+    pub fn working_changes(&self, path: &str) -> Result<Vec<ChangedFile>> {
+        self.with_repo(path, Access::ReadOnly, git::working_changes)
+    }
+    pub fn commit_changes(&self, path: &str, hash: &str) -> Result<CommitChanges> {
+        self.with_repo(path, Access::ReadOnly, |repo| {
+            git::commit_changes(repo, hash)
+        })
+    }
+    pub fn file_diff(&self, path: &str, hash: &str, file: &str) -> Result<String> {
+        self.with_repo(path, Access::ReadOnly, |repo| {
+            git::file_diff(repo, hash, file)
+        })
+    }
+    pub fn switch_branch(&self, path: &str, reference: &str, create: bool) -> Result<RepoStatus> {
+        self.with_repo(path, Access::Write, |repo| {
+            git::check_locks(repo)?;
+            let before = self.raw_status(repo)?;
+            if before.changed > 0 || before.operation.is_some() || !before.conflicts.is_empty() {
+                return Err(GitError::new("changed", "存在未提交改动、冲突或未完成的 Git 操作，请处理后再切换分支；不会自动 stash 或丢弃改动"));
+            }
+            let cwd = Path::new(&repo.path);
+            let mut args = vec!["switch", "--no-guess", "--no-recurse-submodules", "--no-overwrite-ignore"];
+            let local;
+            if create {
+                if reference.is_empty() || reference.starts_with('-') || reference == "HEAD" {
+                    return Err(GitError::new("branch", "请输入有效的新分支名称"));
+                }
+                git::run(cwd, &["check-ref-format", &format!("refs/heads/{reference}")])?;
+                args.extend(["-c", reference, "--", &before.head]);
+            } else {
+                let target = git::branches(repo)?.into_iter().find(|b| b.reference == reference)
+                    .ok_or_else(|| GitError::new("branch", "分支已不存在，请重新加载分支列表"))?;
+                if target.current { return Ok(before); }
+                if target.remote {
+                    let remotes = git::run(cwd, &["remote"])?;
+                    let name = reference.strip_prefix("refs/remotes/").unwrap();
+                    let remote = remotes.lines().filter(|r| name.starts_with(&format!("{r}/"))).max_by_key(|r| r.len())
+                        .ok_or_else(|| GitError::new("branch", "找不到此远程分支对应的 remote"))?;
+                    local = name[remote.len() + 1..].to_string();
+                    args.extend(["--track", "-c", &local, "--", reference]);
+                } else {
+                    local = target.name;
+                    args.extend(["--", &local]);
+                }
+            }
+            self.assert_unchanged(repo, &before)?;
+            git::run(cwd, &args)?;
+            self.errors.lock().unwrap().remove(path);
+            let after = self.raw_status(repo)?;
+            self.log(path, "success", format!("已切换分支 · {}", after.branch));
+            Ok(after)
         })
     }
     fn log(&self, path: &str, level: &str, message: impl AsRef<str>) {
@@ -387,7 +443,7 @@ impl Service {
     pub fn sync(&self, path: &str) -> Result<RepoStatus> {
         self.log(path, "info", "开始同步");
         self.errors.lock().unwrap().remove(path);
-        let result = self.with_repo(path, Access::Sync, |repo| self.sync_inner(repo));
+        let result = self.with_repo(path, Access::Write, |repo| self.sync_inner(repo));
         if let Err(e) = &result {
             self.errors.lock().unwrap().insert(path.into(), e.clone());
             self.log(path, "error", &e.message);

@@ -21,6 +21,9 @@ const api = vi.hoisted(() => ({
   status: vi.fn(),
   history: vi.fn(),
   sync: vi.fn(),
+  branches: vi.fn(),
+  switchBranch: vi.fn(),
+  workingChanges: vi.fn(),
   logs: vi.fn(),
   diagnostic: vi.fn(),
   copy: vi.fn(),
@@ -45,6 +48,14 @@ beforeEach(() => {
   );
   api.sync.mockResolvedValue(status);
   api.logs.mockResolvedValue([]);
+  api.branches.mockResolvedValue([
+    {
+      reference: "refs/heads/feature",
+      name: "feature",
+      remote: false,
+      current: false,
+    },
+  ]);
 });
 afterEach(() => {
   cleanup();
@@ -52,6 +63,110 @@ afterEach(() => {
 });
 
 describe("repository dialogs", () => {
+  it("refreshes actual branch and history after a switch reports a hook failure", async () => {
+    api.switchBranch.mockImplementation(async () => {
+      api.status.mockResolvedValue({
+        ...status,
+        branch: "feature",
+        head: "feature-head",
+      });
+      api.history.mockResolvedValue(makeHistory(1));
+      api.branches.mockResolvedValue([
+        {
+          reference: "refs/heads/feature",
+          name: "feature",
+          remote: false,
+          current: true,
+        },
+      ]);
+      throw { message: "Switched to branch 'feature' · post-checkout failed" };
+    });
+    render(<App />);
+    await screen.findByText("100+");
+    fireEvent.click(screen.getByRole("button", { name: "切换分支" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "feature 切换" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      "Switched to branch 'feature' · post-checkout failed",
+    );
+    expect(
+      screen.getByRole("button", { name: "切换分支" }).textContent,
+    ).toContain("feature");
+    expect(
+      (
+        (await screen.findByRole("button", {
+          name: "feature 当前",
+        })) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    await waitFor(() => expect(screen.queryByText("100+")).toBeNull());
+    expect(api.history).toHaveBeenLastCalledWith(repo.path, 100);
+  });
+  it("opens the attention summary and locates the repository even when search hides it", async () => {
+    api.status.mockResolvedValue({ ...status, kind: "attention", changed: 18 });
+    render(<App />);
+    await screen.findByText("18 项未提交");
+    expect(screen.queryByText("18 M")).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索仓库" }), {
+      target: { value: "no-matches" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "查看 1 个需关注仓库" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "需关注详情" });
+    expect(within(dialog).getByText(/有 18 个文件存在未提交改动/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "定位仓库" }));
+    expect(screen.queryByRole("dialog", { name: "需关注详情" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "搜索仓库" })).toHaveProperty(
+      "value",
+      "",
+    );
+    expect(
+      screen
+        .getByRole("button", { name: /查看仓库 test-repo/ })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+  it("opens the selected repository's actual uncommitted files", async () => {
+    api.status.mockResolvedValue({ ...status, kind: "attention", changed: 1 });
+    api.workingChanges.mockResolvedValue([
+      { path: "src/changed.ts", oldPath: null, status: " M" },
+    ]);
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "查看未提交文件" }),
+    );
+    await screen.findByText("src/changed.ts");
+    expect(screen.getByText("未暂存")).toBeTruthy();
+    expect(api.workingChanges).toHaveBeenCalledExactlyOnceWith(repo.path);
+  });
+  it("switches branches and refreshes status and history from the first page", async () => {
+    api.switchBranch.mockResolvedValue({
+      ...status,
+      branch: "feature",
+      head: "feature-head",
+    });
+    render(<App />);
+    await screen.findByText("100+");
+    fireEvent.click(screen.getByRole("button", { name: "切换分支" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "feature 切换" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "切换分支" })).toBeNull(),
+    );
+    expect(api.switchBranch).toHaveBeenCalledExactlyOnceWith(
+      repo.path,
+      "refs/heads/feature",
+      false,
+    );
+    expect(
+      screen.getByRole("button", { name: "切换分支" }).textContent,
+    ).toContain("feature");
+    expect(api.history).toHaveBeenLastCalledWith(repo.path, 100);
+  });
   it("shows add failures inside the open dialog and permits correcting the path", async () => {
     api.add.mockRejectedValueOnce({ message: "找不到 Git 仓库" });
     render(<App />);
