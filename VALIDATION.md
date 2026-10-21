@@ -1,5 +1,60 @@
 # 第一版验收记录
 
+## 2026-10-21 审查修复后的 Windows 交付
+
+在下述审查修复通过后，重新执行 `npm run desktop:build -- --bundles nsis`，优化正式构建及 NSIS x64 打包通过。安装包为 `artifacts/SourceNeo_0.1.0_x64-reviewed-setup.exe`（仍沿用 `0.1.0` 版本号），SHA-256：`2BA564094C68DF694D27D11EA32AA6E5F140488CB6EAE17C0478EDC6B9538D26`，相邻 `.sha256` 文件可用于校验。构建产物按现有 `.gitignore` 保留在本机，不纳入源码提交。
+
+正常关闭原安装版后，备份最新仓库列表、窗口设置、WebView 外观存储及旧程序文件，使用 `/S /UPDATE /NS` 更新原安装位置，安装器退出码 0。安装后的程序仅与构建原始程序相差预期的 NSIS 包类型标记，安装版 SHA-256 为 `7C0CF88DAD445BF9C2D7B196713E2EF0EA3D636A2D68D5F635AFC2AEB10E26D9`。安装前后 15 个配置 / 外观存储文件哈希一致，启动后仓库配置也与备份逐字节一致，16 个仓库保留，安装版窗口响应正常。备份为 `%TEMP%\sourceneo-reviewed-update-ac6f9639e14d4e989ef05233b4321ea8`。
+
+提交验证复用本次审查通过的 63 项前端测试、47 项 Rust 测试、clippy、Rustfmt 和 Prettier；正式打包再次执行前端构建。下述“未重新安装”描述指审查当时，本节记录其后的重新安装。未重新执行 macOS 实机及终端完整交互验收。
+
+## 2026-10-21 全部未提交改动审查与修复
+
+范围为 `git diff HEAD` 的所有净变化及未跟踪新增源码，没有暂存层差异；未创建 worktree、提交或推送，未操作用户真实远程、仓库列表和配置。本轮发现并修复：
+
+- 自定义 `refs/remotes/company/*` 跟踪映射未更新，导致 Fetch 后仍显示旧 ahead / behind、同步无法快进。现额外保留经 Git 校验、目标只在 `refs/remotes/` 的安全映射和排除规则，继续忽略目标为本地分支 / 标签的危险映射。临时 bare remote 测试验证自定义映射与危险映射、排除规则并存时，本地分支在 Fetch 阶段不变，随后同步能正确快进。
+- 同一路径暂存删除后又重建，状态同时有已暂存删除及未跟踪记录；原来只按路径取第一条，无法预览重建内容。现同时按路径及请求状态匹配，两种预览独立，index 不变。
+- 右键 Fetch 另一 linked worktree 后，当前 linked worktree 的历史可能不刷新；现在刷新共享 Git 目录的当前历史。切换仓库 / 搜索 / 筛选时同时作废迟到的远端选择请求，避免旧弹窗重新出现。
+- 终端原本被统一重定向到 NUL，现交互终端保留标准流，编辑器等后台启动进程保持静默；Windows 自定义 PowerShell / pwsh 也使用固定脚本、环境变量与 `-LiteralPath` 定位，避免特殊目录回退。立即以错误码退出的工具会显示错误。配置保存中禁用输入，避免新输入被已提交的旧快照覆盖。核对了 [Rust Windows 进程启动源码](https://github.com/rust-lang/rust/blob/1.90.0/library/std/src/sys/process/windows.rs) 的标准句柄传递行为。
+
+上述 Diff、Fetch 自定义映射、linked worktree 历史、迟到菜单请求及保存中编辑问题均先用回归测试复现失败，再验证修复通过。`npm run build`、`npm test`（63 项）、`npm run format:check`、`cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`、Rustfmt 与 `git diff --check` 通过。`cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features -- --test-threads=4` 全部通过：43 项临时 Git 场景及 4 项单元测试。Windows 默认 / 自定义 PowerShell 的特殊路径使用实际隐藏辅助进程验证，立即失败工具错误与 junction 越界保护也通过。
+
+本轮未进行 macOS 实机及终端窗口完整交互验收，没有重启、重新安装或覆盖本机应用；下面安装包和本机安装记录对应本轮修复前的版本。外部程序在启动观察期之后发生的运行错误仍由其自身处理。
+
+## 2026-10-21 Windows 安装包与本机更新
+
+用户完成菜单验收后，执行 `npm run desktop:build -- --bundles nsis`，优化正式构建与 x64 NSIS 打包通过。安装包保留当前 `0.1.0` 版本号，位于 `artifacts/SourceNeo_0.1.0_x64-menus-setup.exe`（约 2.15 MiB），相邻 `.sha256` 文件记录校验值：`80537793FDF525D73D86692BB8347922E2B1740C9D512D17171A17339E6BAA6E`。
+
+正常关闭验收用调试实例，备份仓库配置、窗口配置、WebView 外观存储和原安装程序文件，再以 `/S /UPDATE /NS` 更新现有当前用户安装。安装器退出码 0。安装后的可执行文件与本次正式构建逐字节比较，仅有 Tauri 安装包类型标记从 `UNK` 改为 `NSS` 的预期差异；安装版 SHA-256 为 `CC711A3B550EF25DFFE7391EAFC1BED899F28D46B6475421268B19F49EF487F0`。
+
+安装前后 15 个配置 / 外观存储文件哈希一致；安装版在 `%LOCALAPPDATA%\SourceNeo\sourceneo.exe` 成功启动，窗口响应正常。启动后 `repositories.json` 与安装前备份逐字节一致，16 个仓库全部保留。备份目录为 `%TEMP%\sourceneo-before-windows-update-fc13ba570a864692b1d96ee4e221681f`。没有执行 Git 提交、推送、真实远程 Fetch，未改变应用标识或安装位置。
+
+## 2026-10-21 仓库菜单调整
+
+在原有未提交改动之上继续实现，没有新建 worktree、提交或推送。本轮只改前端与文档。仓库行右键、行内“⋯”和详情区“⋯”共享操作菜单，右键其他仓库不改变当前历史；工具设置与菜单分离，移除仍保留确认弹窗。详情区常驻 Fetch、同步和问题查看，文件与提交仍单击打开。
+
+`npm run build`、`npm test`（60 项）、`npm run format:check` 与 `git diff --check` 通过。新增测试覆盖右键操作对象、对非当前仓库选择 Fetch 远端、Shift+F10、菜单定位、方向键跳过禁用项、Home / End、Esc 焦点恢复、外部点击 / 滚动 / resize 关闭、监听清理、操作中禁用状态、详情区入口与再次点击收起。原有移除失败 / 重试 / 迟到响应及外部工具错误重试用例已改为从菜单进入，继续通过。
+
+另用浏览器与拦截 API 的隔离假数据实际验收 1100×760、760×580：菜单显示、右键其他仓库、键盘导航、焦点恢复、按钮再次点击关闭及无横向溢出通过。验收发现短窗口菜单可能覆盖“⋯”触发按钮，已改为根据按钮上下可用空间定位并限制菜单高度、内部滚动，复测通过。本轮没有通过浏览器调用真实 Git 或启动外部程序，没有重新进行 Windows / macOS 原生 UI 验收；Rust 后端未改动，以下保留上一轮后端验证记录。
+
+## 2026-10-21 新增功能验证（Windows）
+
+本轮在当前检出目录实现未提交 diff、仅 Fetch 和外部工具启动，没有 worktree、提交或推送；开始时工作区干净。测试仅使用临时仓库、本地 bare remote 和独立配置，没有访问用户真实远程。
+
+环境：Windows 10 专业版 10.0.19045；Node.js 24.18.0、Cargo 1.97.1、Git 2.53.0.windows.1。
+
+- `npm run build`：通过。
+- `npm test`：55 项通过；新增暂存区 / 工作区切换、失败重试、仓库 / 文件切换及关闭后忽略迟到响应、Fetch 全部失败隔离、命名远端选择、外部工具错误重试。
+- `npm run format:check`：通过。补充 `endOfLine: auto`，让 Windows CRLF 检出与现有格式兼容，避免无关文件换行重写。
+- `cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features`：Git 场景 41 项通过；另有 3 项单元测试通过（启动适配层、Windows PowerShell 实际进程、junction 越界保护）。覆盖 index / HEAD 与工作区 / index、未跟踪文本 / 空 / 二进制 / 截断、首次提交、重命名、删除、模式变化、冲突、中文和特殊文件名、HEAD / index / 工作区不变、预览不创建应用锁；Fetch 覆盖危险本地分支 refspec、禁止 prune、dirty、无 / 多远端、游离 HEAD、空仓库、共享时间、失败保留旧时间及失败隔离。
+- `cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` 与 `cargo fmt --manifest-path src-tauri/Cargo.toml --check`：通过。
+
+Windows 默认终端实际进程测试使用中文、空格、单引号、`&`、`;`、`$` 和方括号目录名。测试发现仅传 `current_dir` 时 PowerShell 可能回退到程序目录；现已用固定脚本读取环境变量并执行 `Set-Location -LiteralPath`，复测得到精确仓库目录。辅助测试进程隐藏窗口；用户请求打开的终端创建可见控制台。编辑器通过启动适配层验证可执行文件与独立目录参数，不拼接命令模板。真实 junction 测试验证打开的文件句柄不能越出仓库；未读取目标内容。
+
+使用临时配置、独立应用标识 `dev.sourceneo.acceptance`，执行 Tauri `build --debug --no-bundle` 生成 Windows 原生程序并成功启动隔离窗口。因 D 盘空间不足，构建与 npm 缓存改放 C 盘临时目录；未清理用户数据。原生截图工具第一次报 `FrameArrived timed out`，重新选择窗口后再次报 `window capture timed out`，因此**本轮没有完成原生视觉和点击验收**；隔离测试进程已关闭，原有安装版进程保留。
+
+macOS 本轮仅验证 Terminal 参数规划，没有 macOS 实机执行。自定义终端需要遵循继承工作目录的启动约定，编辑器需要接受独立目录参数；未遍历所有第三方工具。启动成功表示操作系统已接受进程启动，工具后续运行状态由外部应用负责。此轮未验证正式安装包、签名或公证；下方历史 macOS 记录不代表这三项新增功能已在 macOS 原生验收。
+
 日期：2026-10-20（Asia/Shanghai）。所有 Git 写入验证均使用临时仓库和本地 bare remote，没有对用户真实仓库执行 fetch、拉取或推送。
 
 ## 已验证环境

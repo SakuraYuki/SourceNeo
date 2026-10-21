@@ -4,11 +4,9 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
-  CheckCheck,
   ChevronDown,
   ChevronRight,
   CircleAlert,
-  Copy,
   FolderGit2,
   GitBranch,
   GitFork,
@@ -19,7 +17,7 @@ import {
   RefreshCw,
   Search,
   Settings2,
-  Trash2,
+  MoreHorizontal,
   X,
   Terminal,
   ShieldCheck,
@@ -40,6 +38,8 @@ import { HistoryView } from "./HistoryView";
 import { Dialog } from "./Dialog";
 import { BranchDialog } from "./BranchDialog";
 import { AttentionDialog } from "./AttentionDialog";
+import { ToolSettingsDialog } from "./ExternalTools";
+import { RepoMenu, type MenuAction } from "./RepoMenu";
 import { attention } from "./attention";
 import {
   applyTheme,
@@ -114,6 +114,21 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [adding, setAdding] = useState(false);
   const [branchRepo, setBranchRepo] = useState<Repo | null>(null);
+  const [branchRevision, setBranchRevision] = useState(0);
+  const [menu, setMenu] = useState<{
+    repo: Repo;
+    x: number;
+    y: number;
+    origin: HTMLElement;
+  } | null>(null);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const toolBusy = useRef(new Set<string>());
+  const [openingTools, setOpeningTools] = useState<Set<string>>(new Set());
+  const remoteRequest = useRef(0);
+  const [fetchChoice, setFetchChoice] = useState<{
+    repo: Repo;
+    remotes: string[];
+  } | null>(null);
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [issuesPath, setIssuesPath] = useState<string | undefined>();
   const [addError, setAddError] = useState("");
@@ -152,7 +167,6 @@ export default function App() {
     106,
     viewportHeight - 380 - (notice ? 60 : 0) - (!desktop ? 30 : 0),
   );
-  const [copied, setCopied] = useState(false);
   const repoRef = useRef(repos);
   repoRef.current = repos;
   const busyRef = useRef(new Set<string>());
@@ -286,13 +300,23 @@ export default function App() {
     lastFingerprint.current = statusFingerprint;
   }, [selected, statusFingerprint, loadHistory]);
   const runSync = useCallback(
-    async (repo: Repo) => {
+    async (repo: Repo, fetchOnly = false, remote?: string) => {
       if (busyRef.current.has(repo.path)) return;
       busyRef.current.add(repo.path);
       setBusy(new Set(busyRef.current));
       try {
-        const s = await api.sync(repo.path);
+        const s = fetchOnly
+          ? await api.fetch(repo.path, remote)
+          : await api.sync(repo.path);
         setStatuses((old) => ({ ...old, [repo.path]: s }));
+        if (fetchOnly) setBranchRevision((n) => n + 1);
+        if (fetchOnly)
+          await pooled(
+            repoRef.current.filter(
+              (r) => r.path !== repo.path && r.commonDir === repo.commonDir,
+            ),
+            readStatus,
+          );
         setFailures((old) => {
           const next = { ...old };
           delete next[repo.path];
@@ -305,14 +329,40 @@ export default function App() {
         busyRef.current.delete(repo.path);
         setBusy(new Set(busyRef.current));
         await refreshLogs();
-        if (selectedRef.current === repo.path) {
+        const historyTarget = repoRef.current.find(
+          (r) => r.path === selectedRef.current,
+        );
+        if (
+          historyTarget &&
+          (historyTarget.path === repo.path ||
+            (fetchOnly && historyTarget.commonDir === repo.commonDir))
+        ) {
           setLimit(100);
-          void loadHistory(repo.path, 100);
+          void loadHistory(historyTarget.path, 100);
         }
       }
     },
     [readStatus, refreshLogs, loadHistory],
   );
+  async function chooseFetch(target: Repo) {
+    const id = ++remoteRequest.current;
+    try {
+      const remotes = await api.remotes(target.path);
+      if (
+        !mounted.current ||
+        id !== remoteRequest.current ||
+        !repoRef.current.some((r) => r.path === target.path)
+      )
+        return;
+      setFetchChoice({ repo: target, remotes });
+    } catch (e) {
+      if (mounted.current && id === remoteRequest.current)
+        setNotice(errorText(e));
+    }
+  }
+  async function fetchAll() {
+    await pooled(repoRef.current, (r) => runSync(r, true));
+  }
   async function syncAll() {
     await pooled(repoRef.current, runSync);
   }
@@ -416,22 +466,126 @@ export default function App() {
       setNotice(errorText(e));
     }
   }
-  async function copyDiagnostic() {
-    if (!selected) return;
+  async function copyDiagnostic(path = selected) {
+    if (!path) return;
     try {
       let text: string;
       try {
-        text = await api.diagnostic(selected);
+        text = await api.diagnostic(path);
       } catch (e) {
-        text = `SourceNeo 诊断\n仓库：${selected}\n读取失败：${errorText(e)}`;
+        text = `SourceNeo 诊断\n仓库：${path}\n读取失败：${errorText(e)}`;
       }
       await api.copy(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setNotice("已复制诊断给 AI");
     } catch (e) {
       setNotice(`复制失败：${errorText(e)}`);
     }
   }
+  function openRepoMenu(
+    target: Repo,
+    origin: HTMLElement,
+    x?: number,
+    y?: number,
+  ) {
+    if (x === undefined && menu?.origin === origin) {
+      setMenu(null);
+      return;
+    }
+    remoteRequest.current++;
+    const bounds = origin.getBoundingClientRect();
+    setMenu({
+      repo: target,
+      origin,
+      x: x ?? bounds.left,
+      y: y ?? bounds.bottom + 4,
+    });
+  }
+  async function openTool(target: Repo, kind: string) {
+    if (toolBusy.current.has(target.path)) return;
+    toolBusy.current.add(target.path);
+    setOpeningTools(new Set(toolBusy.current));
+    try {
+      await api.openTool(target.path, kind);
+    } catch (e) {
+      if (mounted.current) setNotice(`${target.name}：${errorText(e)}`);
+    } finally {
+      toolBusy.current.delete(target.path);
+      if (mounted.current) setOpeningTools(new Set(toolBusy.current));
+    }
+  }
+  function menuActions(target: Repo): MenuAction[] {
+    const operating = busy.has(target.path);
+    return [
+      {
+        label: "Fetch 此仓库",
+        disabled: operating,
+        run: () => void runSync(target, true),
+      },
+      {
+        label: "选择获取远端…",
+        disabled: operating,
+        run: () => void chooseFetch(target),
+      },
+      {
+        label: "同步此仓库",
+        disabled: operating,
+        run: () => void runSync(target),
+      },
+      {
+        label: "切换分支…",
+        disabled: operating,
+        run: () => setBranchRepo(target),
+      },
+      {
+        label: "查看未提交文件 / 处理建议",
+        run: () => {
+          setIssuesPath(target.path);
+          setIssuesOpen(true);
+        },
+      },
+      {
+        label: "在终端打开",
+        separator: true,
+        disabled: openingTools.has(target.path),
+        run: () => void openTool(target, "terminal"),
+      },
+      {
+        label: "在编辑器打开",
+        disabled: openingTools.has(target.path),
+        run: () => void openTool(target, "editor"),
+      },
+      {
+        label: "复制仓库路径",
+        separator: true,
+        run: () => {
+          void api
+            .copy(target.path)
+            .then(() => setNotice("已复制仓库路径"))
+            .catch((e) => setNotice(errorText(e)));
+        },
+      },
+      {
+        label: "复制诊断给 AI",
+        run: () => void copyDiagnostic(target.path),
+      },
+      { label: "外部工具设置", run: () => setToolsOpen(true) },
+      {
+        label: "从列表移除…",
+        separator: true,
+        danger: true,
+        disabled: operating,
+        run: () => {
+          removeSession.current++;
+          setRemoveError("");
+          setRemove(target);
+        },
+      },
+    ];
+  }
+  useEffect(() => {
+    remoteRequest.current++;
+    setMenu(null);
+  }, [selected, query, filter]);
   const repo = repos.find((r) => r.path === selected),
     status = statuses[selected];
   const isIssue = (r: Repo) =>
@@ -546,6 +700,13 @@ export default function App() {
               <RefreshCw size={15} />
             )}
             同步全部{repos.length > 0 && <kbd>{repos.length}</kbd>}
+          </button>
+          <button
+            disabled={!repos.length || busy.size > 0}
+            onClick={() => void fetchAll()}
+            title="仅获取远程对象和远程跟踪引用"
+          >
+            Fetch 全部
           </button>
         </div>
       </header>
@@ -709,6 +870,23 @@ export default function App() {
                   <div
                     key={r.path}
                     className={`repo-row ${r.path === selected ? "selected" : ""} ${loading ? "operating" : ""} ${isIssue(r) ? "has-issue" : ""}`}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      const origin =
+                        e.currentTarget.querySelector<HTMLButtonElement>(
+                          ".repo-select",
+                        )!;
+                      openRepoMenu(r, origin, e.clientX, e.clientY);
+                    }}
+                    onKeyDown={(e) => {
+                      if (
+                        e.key === "ContextMenu" ||
+                        (e.shiftKey && e.key === "F10")
+                      ) {
+                        e.preventDefault();
+                        openRepoMenu(r, e.target as HTMLElement);
+                      }
+                    }}
                   >
                     <button
                       className="repo-select"
@@ -752,7 +930,7 @@ export default function App() {
                         {loading ? (
                           <span className="badge working">
                             <LoaderCircle size={12} className="spin" />
-                            同步中
+                            操作中
                           </span>
                         ) : kind ? (
                           <span className={`badge ${kind}`} title={info.reason}>
@@ -802,17 +980,18 @@ export default function App() {
                         />
                       </button>
                       <button
-                        className="icon-btn remove-btn"
-                        title={`移除 ${r.name}`}
-                        aria-label={`移除 ${r.name}`}
-                        disabled={loading}
-                        onClick={() => {
-                          removeSession.current++;
-                          setRemoveError("");
-                          setRemove(r);
-                        }}
+                        className="icon-btn"
+                        title={`更多操作 ${r.name}`}
+                        aria-label={`更多操作 ${r.name}`}
+                        aria-haspopup="menu"
+                        aria-expanded={
+                          menu?.repo.path === r.path &&
+                          menu.origin.getAttribute("aria-label") ===
+                            `更多操作 ${r.name}`
+                        }
+                        onClick={(e) => openRepoMenu(r, e.currentTarget)}
                       >
-                        <Trash2 size={13} />
+                        <MoreHorizontal size={13} />
                       </button>
                     </div>
                   </div>
@@ -891,14 +1070,31 @@ export default function App() {
                 </>
               )}
             </div>
-            <button
-              className="text-btn"
-              disabled={!selected}
-              onClick={() => void copyDiagnostic()}
-            >
-              {copied ? <CheckCheck size={13} /> : <Copy size={13} />}{" "}
-              {copied ? "已复制" : "复制诊断给 AI"}
-            </button>
+            {repo && (
+              <div className="detail-actions">
+                <button
+                  className="text-btn"
+                  disabled={busy.has(repo.path)}
+                  onClick={() => void runSync(repo, true)}
+                >
+                  Fetch 此仓库
+                </button>
+                <button
+                  className="icon-btn"
+                  aria-label="当前仓库更多操作"
+                  title="更多操作"
+                  aria-haspopup="menu"
+                  aria-expanded={
+                    menu?.repo.path === repo.path &&
+                    menu.origin.getAttribute("aria-label") ===
+                      "当前仓库更多操作"
+                  }
+                  onClick={(e) => openRepoMenu(repo, e.currentTarget)}
+                >
+                  <MoreHorizontal size={16} />
+                </button>
+              </div>
+            )}
           </div>
           {repo && (
             <div
@@ -1031,7 +1227,7 @@ export default function App() {
       <footer>
         <span>
           <i className={`dot ${busy.size ? "attention" : "synced"}`} />
-          {busy.size ? `${busy.size} 个仓库正在同步` : "就绪"}
+          {busy.size ? `${busy.size} 个仓库正在操作` : "就绪"}
           <span className="footer-divider" />
           Git CLI
         </span>
@@ -1041,6 +1237,16 @@ export default function App() {
           v0.1.0
         </span>
       </footer>
+      {menu && repos.some((r) => r.path === menu.repo.path) && (
+        <RepoMenu
+          key={`${menu.repo.path}:${menu.x}:${menu.y}`}
+          {...menu}
+          label={`仓库操作 · ${menu.repo.name}`}
+          actions={menuActions(menu.repo)}
+          onClose={() => setMenu(null)}
+        />
+      )}
+      {toolsOpen && <ToolSettingsDialog onClose={() => setToolsOpen(false)} />}
       {adding && (
         <Dialog label="添加本地仓库" onClose={closeAdd}>
           <form
@@ -1088,13 +1294,37 @@ export default function App() {
       )}
       {branchRepo && (
         <BranchDialog
-          key={branchRepo.path}
+          key={`${branchRepo.path}:${branchRevision}`}
           repo={branchRepo}
           onClose={() => setBranchRepo(null)}
           onSwitch={(reference, create) =>
             changeBranch(branchRepo, reference, create)
           }
         />
+      )}
+      {fetchChoice && (
+        <Dialog label="选择获取远端" onClose={() => setFetchChoice(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>选择获取远端 · {fetchChoice.repo.name}</h2>
+            <p>
+              仅更新远程跟踪引用，不拉取或推送。无远端时请先用外部工具添加
+              remote。
+            </p>
+            {fetchChoice.remotes.map((remote) => (
+              <button
+                key={remote}
+                onClick={() => {
+                  const target = fetchChoice.repo;
+                  setFetchChoice(null);
+                  void runSync(target, true, remote);
+                }}
+              >
+                {remote}
+              </button>
+            ))}
+            <button onClick={() => setFetchChoice(null)}>关闭</button>
+          </div>
+        </Dialog>
       )}
       {issuesOpen && (
         <AttentionDialog

@@ -191,7 +191,9 @@ pub fn run_timeout(path: &Path, args: &[&str], timeout: Duration) -> Result<Stri
             }
             #[cfg(windows)]
             {
+                use std::os::windows::process::CommandExt;
                 let _ = Command::new("taskkill")
+                    .creation_flags(0x08000000)
                     .args(["/PID", &child.id().to_string(), "/T", "/F"])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
@@ -649,4 +651,334 @@ pub fn file_diff(repo: &Repo, hash: &str, path: &str) -> Result<String> {
         &["--patch", "--src-prefix=a/", "--dst-prefix=b/"],
         &paths,
     )
+}
+
+pub fn working_diff(repo: &Repo, path: &str, side: &str) -> Result<String> {
+    if !matches!(side, "staged" | "unstaged" | "untracked") {
+        return Err(GitError::new("path", "无效的差异类型"));
+    }
+    let file = working_changes(repo)?
+        .into_iter()
+        .find(|f| {
+            f.path == path
+                && (f.status.contains('U')
+                    || matches!(f.status.as_str(), "AA" | "DD")
+                    || match side {
+                        "untracked" => f.status == "??",
+                        "staged" => f.status != "??" && f.status.as_bytes()[0] != b' ',
+                        "unstaged" => f.status != "??" && f.status.as_bytes()[1] != b' ',
+                        _ => false,
+                    })
+        })
+        .ok_or_else(|| GitError::new("changed", "文件状态已变化，请刷新文件列表"))?;
+    if file.status.contains('U') || matches!(file.status.as_str(), "AA" | "DD") {
+        return Ok("冲突尚未解决；请在外部工具检查 index 的冲突阶段和工作区内容。".into());
+    }
+    let root = Path::new(&repo.path);
+    let mut current = root.to_path_buf();
+    for component in Path::new(path).components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err(GitError::new("path", "无效的仓库相对路径"));
+        }
+        current.push(component);
+        if let Ok(meta) = std::fs::symlink_metadata(&current) {
+            if side != "staged" && meta.file_type().is_symlink() {
+                return Ok("符号链接：不读取链接目标；请使用外部工具检查。".into());
+            }
+        }
+    }
+    let patch = if file.status == "??" {
+        if side != "untracked" {
+            return Err(GitError::new("changed", "请选择未跟踪内容"));
+        }
+        let handle = open_preview(root, path)?;
+        if !handle
+            .metadata()
+            .map_err(|e| GitError::new("io", e.to_string()))?
+            .is_file()
+        {
+            return Err(GitError::new("path", "仅预览普通文件"));
+        }
+        if !dunce::canonicalize(&current)
+            .map_err(|e| GitError::new("path", e.to_string()))?
+            .starts_with(root)
+        {
+            return Err(GitError::new("path", "文件已移到仓库之外"));
+        }
+        let mut bytes = Vec::new();
+        handle
+            .take(256 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| GitError::new("io", e.to_string()))?;
+        if bytes.contains(&0) {
+            "二进制文件：不提供文本预览".into()
+        } else if bytes.is_empty() {
+            "空文件（未跟踪）".into()
+        } else {
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    } else {
+        let index = match side {
+            "staged" => 0,
+            "unstaged" => 1,
+            _ => return Err(GitError::new("path", "无效的差异类型")),
+        };
+        if file.status.as_bytes()[index] == b' ' {
+            return Err(GitError::new("changed", "此状态已无差异，请刷新"));
+        }
+        let mut args = vec![
+            "--literal-pathspecs",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-relative",
+            "--find-renames",
+            "--patch",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+        ];
+        if side == "staged" {
+            args.push("--cached");
+        }
+        args.extend(["--", path]);
+        if let Some(old) = &file.old_path {
+            args.push(old);
+        }
+        run(root, &args)?
+    };
+    let mut end = patch.len().min(256 * 1024);
+    while !patch.is_char_boundary(end) {
+        end -= 1;
+    }
+    let lines: Vec<_> = patch[..end].lines().take(2000).collect();
+    let mut result = lines.join("\n");
+    if end < patch.len() || patch.lines().count() > 2000 {
+        result.push_str("\n[预览已截断：最多 256 KiB / 2,000 行]");
+    }
+    Ok(if result.is_empty() {
+        "无文本差异（空文件、模式变化或状态已变化；请刷新）".into()
+    } else {
+        result
+    })
+}
+
+// Open without following links. Validate the opened Windows handle (rather than
+// a second path lookup), and walk Unix directory descriptors without symlinks.
+fn open_preview(root: &Path, relative: &str) -> Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+        unsafe extern "system" {
+            fn GetFinalPathNameByHandleW(
+                handle: *mut std::ffi::c_void,
+                buffer: *mut u16,
+                length: u32,
+                flags: u32,
+            ) -> u32;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(0x00200000)
+            .open(root.join(relative))
+            .map_err(|e| GitError::new("io", e.to_string()))?;
+        let mut buffer = vec![0u16; 32768];
+        let n = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                0,
+            )
+        } as usize;
+        if n == 0
+            || n >= buffer.len()
+            || file
+                .metadata()
+                .map_err(|e| GitError::new("io", e.to_string()))?
+                .file_type()
+                .is_symlink()
+        {
+            return Err(GitError::new("path", "无法安全读取符号链接或文件路径"));
+        }
+        let actual = PathBuf::from(String::from_utf16_lossy(&buffer[..n]));
+        if !dunce::simplified(&actual).starts_with(dunce::simplified(root)) {
+            return Err(GitError::new("path", "文件已移到仓库之外"));
+        }
+        Ok(file)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let mut dir = std::fs::File::open(root).map_err(|e| GitError::new("io", e.to_string()))?;
+        let components: Vec<_> = Path::new(relative).components().collect();
+        for (i, component) in components.iter().enumerate() {
+            use std::os::unix::ffi::OsStrExt;
+            let name = std::ffi::CString::new(component.as_os_str().as_bytes())
+                .map_err(|_| GitError::new("path", "无效路径"))?;
+            let flags = libc::O_RDONLY
+                | libc::O_NOFOLLOW
+                | libc::O_NONBLOCK
+                | if i + 1 < components.len() {
+                    libc::O_DIRECTORY
+                } else {
+                    0
+                };
+            let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
+            if fd < 0 {
+                return Err(GitError::new(
+                    "path",
+                    std::io::Error::last_os_error().to_string(),
+                ));
+            }
+            dir = unsafe { std::fs::File::from_raw_fd(fd) };
+        }
+        Ok(dir)
+    }
+}
+
+pub fn fetch_remotes(repo: &Repo) -> Result<Vec<String>> {
+    let path = Path::new(&repo.path);
+    let mut remotes: Vec<String> = run(path, &["remote"])?.lines().map(String::from).collect();
+    let branch = run(path, &["symbolic-ref", "--quiet", "--short", "HEAD"]).unwrap_or_default();
+    if !branch.is_empty() {
+        let configured = run(
+            path,
+            &[
+                "config",
+                "--get",
+                &format!("branch.{}.remote", branch.trim()),
+            ],
+        )
+        .unwrap_or_default();
+        if let Some(i) = remotes.iter().position(|r| r == configured.trim()) {
+            remotes.swap(0, i);
+        }
+    }
+    Ok(remotes)
+}
+
+#[cfg(all(test, windows))]
+mod preview_safety_tests {
+    use super::*;
+    #[test]
+    fn opened_handle_cannot_escape_repository_through_a_junction() {
+        use std::os::windows::process::CommandExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "must not be read").unwrap();
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let output = Command::new(system)
+            .args(["-NoProfile", "-Command", "New-Item -ItemType Junction -Path $env:SRC_LINK -Target $env:SRC_TARGET | Out-Null"])
+            .env("SRC_LINK", root.join("linked")).env("SRC_TARGET", &outside)
+            .creation_flags(0x08000000).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(open_preview(&root, "linked/secret.txt").is_err());
+        std::fs::remove_dir(root.join("linked")).unwrap();
+    }
+}
+
+pub fn fetch_only(repo: &Repo, selected: Option<&str>) -> Result<()> {
+    let path = Path::new(&repo.path);
+    let remotes = fetch_remotes(repo)?;
+    let branch = run(path, &["symbolic-ref", "--quiet", "--short", "HEAD"]).unwrap_or_default();
+    let configured = if branch.is_empty() {
+        String::new()
+    } else {
+        run(
+            path,
+            &[
+                "config",
+                "--get",
+                &format!("branch.{}.remote", branch.trim()),
+            ],
+        )
+        .unwrap_or_default()
+    };
+    let remote = if let Some(name) = selected {
+        remotes.iter().find(|r| r.as_str() == name)
+    } else if remotes.iter().any(|r| r == configured.trim()) {
+        remotes.iter().find(|r| r.as_str() == configured.trim())
+    } else if remotes.len() == 1 {
+        remotes.first()
+    } else {
+        None
+    }
+    .ok_or_else(|| {
+        GitError::new(
+            "remote",
+            if remotes.is_empty() {
+                "没有命名远端；请在外部工具添加 remote".into()
+            } else {
+                format!(
+                    "请选择获取远端（{}）；可在仓库菜单中选择“选择获取远端…”后重试",
+                    remotes.join("、")
+                )
+            },
+        )
+    })?;
+    run(
+        path,
+        &["check-ref-format", &format!("refs/remotes/{remote}/probe")],
+    )?;
+    // Never let configured mappings target local branches/tags. Preserve safe
+    // custom tracking maps so @{upstream} cannot silently stay stale after fetch.
+    let mut mappings = vec![format!("+refs/heads/*:refs/remotes/{remote}/*")];
+    let configured_maps = run(
+        path,
+        &[
+            "config",
+            "--null",
+            "--get-all",
+            &format!("remote.{remote}.fetch"),
+        ],
+    )
+    .unwrap_or_default();
+    for mapping in configured_maps.split_terminator('\0') {
+        if mappings.iter().any(|existing| existing == mapping) {
+            continue;
+        }
+        if let Some(source) = mapping.strip_prefix('^') {
+            if source.starts_with("refs/") {
+                run(path, &["check-ref-format", "--refspec-pattern", source])?;
+                mappings.push(mapping.into());
+            }
+        } else if let Some((source, destination)) = mapping.trim_start_matches('+').split_once(':')
+        {
+            if source.starts_with("refs/") && destination.starts_with("refs/remotes/") {
+                run(path, &["check-ref-format", "--refspec-pattern", source])?;
+                run(
+                    path,
+                    &["check-ref-format", "--refspec-pattern", destination],
+                )?;
+                mappings.push(mapping.into());
+            }
+        }
+    }
+    let mut args = vec![
+        "-c",
+        "fetch.prune=false",
+        "-c",
+        "fetch.pruneTags=false",
+        "fetch",
+        "--no-prune",
+        "--no-prune-tags",
+        "--no-tags",
+        "--no-recurse-submodules",
+        "--no-auto-maintenance",
+        "--refmap=",
+        "--",
+        remote,
+    ];
+    args.extend(mappings.iter().map(String::as_str));
+    run(path, &args)?;
+    Ok(())
 }

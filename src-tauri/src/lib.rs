@@ -1,6 +1,7 @@
 pub mod git;
 pub mod model;
 pub mod service;
+pub mod tools;
 
 #[cfg(feature = "desktop")]
 mod desktop {
@@ -54,6 +55,47 @@ mod desktop {
     pub async fn working_changes(state: Backend<'_>, path: String) -> Result<Vec<ChangedFile>> {
         let s = state.inner().clone();
         blocking(move || s.working_changes(&path)).await
+    }
+    #[tauri::command]
+    pub async fn tool_settings(state: Backend<'_>) -> Result<crate::tools::ToolSettings> {
+        Ok(state.tool_settings())
+    }
+    #[tauri::command]
+    pub async fn save_tool_settings(
+        state: Backend<'_>,
+        settings: crate::tools::ToolSettings,
+    ) -> Result<()> {
+        let s = state.inner().clone();
+        blocking(move || s.save_tool_settings(settings)).await
+    }
+    #[tauri::command]
+    pub async fn open_tool(state: Backend<'_>, path: String, kind: String) -> Result<()> {
+        let s = state.inner().clone();
+        blocking(move || s.open_tool(&path, &kind)).await
+    }
+    #[tauri::command]
+    pub async fn fetch_remotes(state: Backend<'_>, path: String) -> Result<Vec<String>> {
+        let s = state.inner().clone();
+        blocking(move || s.fetch_remotes(&path)).await
+    }
+    #[tauri::command]
+    pub async fn fetch_repo(
+        state: Backend<'_>,
+        path: String,
+        remote: Option<String>,
+    ) -> Result<RepoStatus> {
+        let s = state.inner().clone();
+        blocking(move || s.fetch(&path, remote.as_deref())).await
+    }
+    #[tauri::command]
+    pub async fn working_diff(
+        state: Backend<'_>,
+        path: String,
+        file: String,
+        side: String,
+    ) -> Result<String> {
+        let s = state.inner().clone();
+        blocking(move || s.working_diff(&path, &file, &side)).await
     }
     #[tauri::command]
     pub async fn switch_branch(
@@ -134,6 +176,12 @@ mod desktop {
                 sync_repo,
                 repo_branches,
                 working_changes,
+                working_diff,
+                fetch_remotes,
+                fetch_repo,
+                tool_settings,
+                save_tool_settings,
+                open_tool,
                 switch_branch,
                 commit_changes,
                 file_diff,

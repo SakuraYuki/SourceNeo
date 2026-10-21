@@ -22,9 +22,20 @@ export const api = {
   history: (path: string, limit: number) =>
     invoke<History>("repo_history", { path, limit }),
   sync: (path: string) => invoke<RepoStatus>("sync_repo", { path }),
+  fetch: (path: string, remote?: string) =>
+    invoke<RepoStatus>("fetch_repo", { path, remote }),
+  remotes: (path: string) => invoke<string[]>("fetch_remotes", { path }),
+  toolSettings: () =>
+    invoke<{ terminal: string; editor: string }>("tool_settings"),
+  saveToolSettings: (settings: { terminal: string; editor: string }) =>
+    invoke<void>("save_tool_settings", { settings }),
+  openTool: (path: string, kind: string) =>
+    invoke<void>("open_tool", { path, kind }),
   branches: (path: string) => invoke<Branch[]>("repo_branches", { path }),
   workingChanges: (path: string) =>
     invoke<ChangedFile[]>("working_changes", { path }),
+  workingDiff: (path: string, file: string, side: string) =>
+    invoke<string>("working_diff", { path, file, side }),
   switchBranch: (path: string, reference: string, create = false) =>
     invoke<RepoStatus>("switch_branch", { path, reference, create }),
   changes: (path: string, hash: string) =>

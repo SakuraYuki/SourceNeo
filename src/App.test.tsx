@@ -21,6 +21,11 @@ const api = vi.hoisted(() => ({
   status: vi.fn(),
   history: vi.fn(),
   sync: vi.fn(),
+  fetch: vi.fn(),
+  remotes: vi.fn(),
+  openTool: vi.fn(),
+  toolSettings: vi.fn(),
+  saveToolSettings: vi.fn(),
   branches: vi.fn(),
   switchBranch: vi.fn(),
   workingChanges: vi.fn(),
@@ -34,6 +39,14 @@ vi.mock("./api", async (original) => ({
   api,
   desktop: true,
 }));
+
+function menuAction(label: string, name = repo.name) {
+  fireEvent.click(screen.getByRole("button", { name: `更多操作 ${name}` }));
+  fireEvent.click(screen.getByRole("menuitem", { name: label }));
+}
+function removeFromMenu(name: string) {
+  menuAction("从列表移除…", name);
+}
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -63,6 +76,146 @@ afterEach(() => {
 });
 
 describe("repository dialogs", () => {
+  it("refreshes the selected linked worktree history after fetching another linked worktree", async () => {
+    const linked = { ...repo, path: "/test/linked", name: "linked" };
+    api.list.mockResolvedValue([repo, linked]);
+    api.fetch.mockResolvedValue({ ...status, path: linked.path });
+    render(<App />);
+    await screen.findByText("100+");
+    api.history.mockClear();
+    menuAction("Fetch 此仓库", linked.name);
+    await waitFor(() =>
+      expect(api.history).toHaveBeenCalledWith(repo.path, 100),
+    );
+  });
+  it("ignores a late remote selector after switching repositories", async () => {
+    const other = {
+      ...repo,
+      path: "/test/other",
+      name: "other",
+      commonDir: "/test/other/.git",
+    };
+    let finish!: (value: string[]) => void;
+    api.list.mockResolvedValue([repo, other]);
+    api.remotes.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    render(<App />);
+    await screen.findByText("100+");
+    menuAction("选择获取远端…");
+    fireEvent.click(screen.getByRole("button", { name: /查看仓库 other/ }));
+    await act(async () => finish(["origin"]));
+    expect(screen.queryByRole("dialog", { name: "选择获取远端" })).toBeNull();
+  });
+  it("targets the right-clicked repository without changing the selected history", async () => {
+    const other = {
+      ...repo,
+      path: "/other & 中文",
+      name: "Other",
+      commonDir: "/other/.git",
+    };
+    api.list.mockResolvedValue([repo, other]);
+    api.copy.mockResolvedValue(undefined);
+    api.remotes.mockResolvedValue(["origin", "backup"]);
+    api.fetch.mockResolvedValue({ ...status, path: other.path });
+    render(<App />);
+    await screen.findByText("100+");
+    const row = screen.getByRole("button", { name: /查看仓库 Other/ });
+    fireEvent.contextMenu(row, { clientX: 500, clientY: 250 });
+    expect(screen.getByRole("menu", { name: "仓库操作 · Other" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("menuitem", { name: "复制仓库路径" }));
+    expect(api.copy).toHaveBeenCalledWith(other.path);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(api.history).toHaveBeenLastCalledWith(repo.path, 100);
+    fireEvent.keyDown(row, { key: "F10", shiftKey: true });
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    expect(document.activeElement).toBe(row);
+    fireEvent.contextMenu(row, { clientX: 500, clientY: 250 });
+    fireEvent.click(screen.getByRole("menuitem", { name: "选择获取远端…" }));
+    fireEvent.click(await screen.findByRole("button", { name: "backup" }));
+    await waitFor(() =>
+      expect(api.fetch).toHaveBeenCalledWith(other.path, "backup"),
+    );
+    expect(api.history).toHaveBeenLastCalledWith(repo.path, 100);
+  });
+  it("uses the details menu and disables Git actions for an operating repository", async () => {
+    api.fetch.mockReturnValue(new Promise(() => {}));
+    api.toolSettings.mockResolvedValue({ terminal: "", editor: "" });
+    render(<App />);
+    await screen.findByText("100+");
+    expect(screen.queryByRole("button", { name: "在编辑器打开" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Fetch 此仓库" }));
+    fireEvent.click(screen.getByRole("button", { name: "当前仓库更多操作" }));
+    const trigger = screen.getByRole("button", { name: "当前仓库更多操作" });
+    fireEvent.pointerDown(trigger);
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("menu")).toBeNull();
+    fireEvent.click(trigger);
+    expect(
+      (
+        screen.getByRole("menuitem", {
+          name: "同步此仓库",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(
+      (
+        screen.getByRole("menuitem", {
+          name: "从列表移除…",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(
+      (
+        screen.getByRole("menuitem", {
+          name: "在终端打开",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false);
+    fireEvent.click(screen.getByRole("menuitem", { name: "外部工具设置" }));
+    expect(screen.queryByRole("menu")).toBeNull();
+    await screen.findByLabelText("编辑器可执行文件");
+  });
+  it("fetches all with failure isolation and never calls sync", async () => {
+    const other = {
+      ...repo,
+      path: "/test/other",
+      name: "other",
+      commonDir: "/test/other/.git",
+    };
+    api.list.mockResolvedValue([repo, other]);
+    api.fetch.mockImplementation(async (path: string) => {
+      if (path === repo.path) throw { message: "fetch failed" };
+      return { ...status, path, lastFetched: 20 };
+    });
+    render(<App />);
+    await screen.findByText("100+");
+    fireEvent.click(screen.getByRole("button", { name: "Fetch 全部" }));
+    await waitFor(() => expect(api.fetch).toHaveBeenCalledTimes(2));
+    expect(api.sync).not.toHaveBeenCalled();
+    await screen.findByText(/test-repo：fetch failed/);
+  });
+  it("selects a named fetch remote and retries tool errors", async () => {
+    api.remotes.mockResolvedValue(["origin", "backup"]);
+    api.fetch.mockResolvedValue({ ...status, lastFetched: 20 });
+    api.openTool
+      .mockRejectedValueOnce({ message: "missing editor" })
+      .mockResolvedValueOnce(undefined);
+    render(<App />);
+    await screen.findByText("100+");
+    menuAction("选择获取远端…");
+    fireEvent.click(await screen.findByRole("button", { name: "backup" }));
+    await waitFor(() =>
+      expect(api.fetch).toHaveBeenCalledWith(repo.path, "backup"),
+    );
+    menuAction("在编辑器打开");
+    await screen.findByText(/missing editor/);
+    menuAction("在编辑器打开");
+    await waitFor(() => expect(api.openTool).toHaveBeenCalledTimes(2));
+  });
   it("refreshes actual branch and history after a switch reports a hook failure", async () => {
     api.switchBranch.mockImplementation(async () => {
       api.status.mockResolvedValue({
@@ -193,7 +346,7 @@ describe("repository dialogs", () => {
     api.remove.mockRejectedValueOnce({ message: "无法保存仓库列表" });
     render(<App />);
     await screen.findByText("100+");
-    fireEvent.click(screen.getByRole("button", { name: `移除 ${repo.name}` }));
+    removeFromMenu(repo.name);
     const dialog = document.querySelector("dialog")!;
     fireEvent.click(within(dialog).getByRole("button", { name: "从列表移除" }));
     expect((await within(dialog).findByRole("alert")).textContent).toContain(
@@ -201,7 +354,7 @@ describe("repository dialogs", () => {
     );
     expect(dialog.hasAttribute("open")).toBe(true);
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
-    fireEvent.click(screen.getByRole("button", { name: `移除 ${repo.name}` }));
+    removeFromMenu(repo.name);
     expect(
       within(document.querySelector("dialog")!).queryByRole("alert"),
     ).toBeNull();
@@ -239,7 +392,7 @@ it.each(["success", "failure"])(
 );
 
 async function removeFinalRepo() {
-  fireEvent.click(screen.getByRole("button", { name: `移除 ${repo.name}` }));
+  removeFromMenu(repo.name);
   api.remove.mockResolvedValueOnce(undefined);
   api.list.mockResolvedValueOnce([]);
   fireEvent.click(screen.getByRole("button", { name: "从列表移除" }));
@@ -346,7 +499,7 @@ it.each(["success", "failure"])(
     api.remove.mockReturnValueOnce(pending.promise);
     render(<App />);
     await screen.findByText("100+");
-    fireEvent.click(screen.getByRole("button", { name: `移除 ${repo.name}` }));
+    removeFromMenu(repo.name);
     let dialog = document.querySelector("dialog")!;
     fireEvent.click(within(dialog).getByRole("button", { name: "从列表移除" }));
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
@@ -354,7 +507,7 @@ it.each(["success", "failure"])(
     await waitFor(() =>
       expect(api.history).toHaveBeenLastCalledWith(c.path, 100),
     );
-    fireEvent.click(screen.getByRole("button", { name: "移除 Repo B" }));
+    removeFromMenu("Repo B");
     dialog = document.querySelector("dialog")!;
     api.list.mockResolvedValue([b, c]);
     await act(async () => {
@@ -399,7 +552,7 @@ it("prevents duplicate remove submissions while the request is pending", async (
   api.remove.mockReturnValue(pending.promise);
   render(<App />);
   await screen.findByText("100+");
-  fireEvent.click(screen.getByRole("button", { name: `移除 ${repo.name}` }));
+  removeFromMenu(repo.name);
   const button = within(document.querySelector("dialog")!).getByRole("button", {
     name: "从列表移除",
   }) as HTMLButtonElement;
@@ -430,7 +583,7 @@ it("ignores an old add-list snapshot after a newer removal", async () => {
   fireEvent.submit(dialog.querySelector("form")!);
   await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
   fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
-  fireEvent.click(screen.getByRole("button", { name: `移除 ${repo.name}` }));
+  removeFromMenu(repo.name);
   dialog = document.querySelector("dialog")!;
   fireEvent.click(within(dialog).getByRole("button", { name: "从列表移除" }));
   await waitFor(() =>
@@ -461,7 +614,7 @@ it("ignores an old remove-list snapshot after a newer addition", async () => {
     .mockResolvedValue([kept, added]);
   render(<App />);
   await screen.findByText("100+");
-  fireEvent.click(screen.getByRole("button", { name: `移除 ${repo.name}` }));
+  removeFromMenu(repo.name);
   let dialog = document.querySelector("dialog")!;
   fireEvent.click(within(dialog).getByRole("button", { name: "从列表移除" }));
   await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));

@@ -6,6 +6,255 @@ use std::{
     sync::Arc,
 };
 use tempfile::TempDir;
+
+#[test]
+fn working_preview_is_read_only_and_distinguishes_index_from_worktree() {
+    let f = Fixture::new();
+    let repo = git::discover(f.a.to_str().unwrap()).unwrap();
+    fs::write(f.a.join("shared.txt"), "staged-only\n").unwrap();
+    g(&f.a, &["add", "shared.txt"]);
+    fs::write(f.a.join("shared.txt"), "worktree-only\n").unwrap();
+    let index = fs::read(f.a.join(".git/index")).unwrap();
+    let head = g(&f.a, &["rev-parse", "HEAD"]);
+    let staged = git::working_diff(&repo, "shared.txt", "staged").unwrap();
+    assert!(staged.contains("+staged-only"));
+    assert!(!staged.contains("worktree-only"));
+    let unstaged = git::working_diff(&repo, "shared.txt", "unstaged").unwrap();
+    assert!(unstaged.contains("-staged-only"));
+    assert!(unstaged.contains("+worktree-only"));
+    let special = "中文 空格 & '$ [x].txt";
+    fs::write(f.a.join(special), "new content\n").unwrap();
+    assert_eq!(
+        git::working_diff(&repo, special, "untracked").unwrap(),
+        "new content"
+    );
+    fs::write(f.a.join("binary"), [0, 1, 2]).unwrap();
+    assert!(git::working_diff(&repo, "binary", "untracked")
+        .unwrap()
+        .contains("二进制"));
+    fs::write(f.a.join("empty"), "").unwrap();
+    assert!(git::working_diff(&repo, "empty", "untracked")
+        .unwrap()
+        .contains("空文件"));
+    fs::write(f.a.join("large"), "x\n".repeat(2100)).unwrap();
+    assert!(git::working_diff(&repo, "large", "untracked")
+        .unwrap()
+        .contains("已截断"));
+    assert!(git::working_diff(&repo, "../outside", "untracked").is_err());
+    assert_eq!(fs::read(f.a.join(".git/index")).unwrap(), index);
+    assert_eq!(g(&f.a, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fs::read_to_string(f.a.join("shared.txt")).unwrap(),
+        "worktree-only\n"
+    );
+    assert!(!Path::new(&repo.common_dir).join("sourceneo.lock").exists());
+    g(&f.a, &["update-index", "--chmod=+x", "shared.txt"]);
+    assert!(git::working_diff(&repo, "shared.txt", "staged")
+        .unwrap()
+        .contains("new mode 100755"));
+}
+
+#[test]
+fn working_preview_initial_rename_delete_binary_conflict_and_external_diff() {
+    let f = Fixture::new();
+    let empty = f.root.join("initial");
+    g(&f.root, &["init", empty.to_str().unwrap()]);
+    fs::write(empty.join("first"), "first\n").unwrap();
+    g(&empty, &["add", "first"]);
+    let repo = git::discover(empty.to_str().unwrap()).unwrap();
+    assert!(git::working_diff(&repo, "first", "staged")
+        .unwrap()
+        .contains("+first"));
+    let repo = git::discover(f.a.to_str().unwrap()).unwrap();
+    g(&f.a, &["mv", "shared.txt", "renamed.txt"]);
+    assert!(git::working_diff(&repo, "renamed.txt", "staged")
+        .unwrap()
+        .contains("rename from shared.txt"));
+    fs::remove_file(f.a.join("renamed.txt")).unwrap();
+    assert!(git::working_diff(&repo, "renamed.txt", "unstaged")
+        .unwrap()
+        .contains("deleted file"));
+    fs::write(f.a.join("binary"), [0, 4, 2]).unwrap();
+    g(&f.a, &["add", "binary"]);
+    assert!(git::working_diff(&repo, "binary", "staged")
+        .unwrap()
+        .contains("Binary files"));
+    g(
+        &f.a,
+        &["config", "diff.external", "sourceneo-must-never-run"],
+    );
+    assert!(git::working_diff(&repo, "renamed.txt", "staged").is_ok());
+    // Build a real unmerged index without changing the current working tree.
+    let oid = g(&f.a, &["rev-parse", "HEAD:shared.txt"]);
+    let mut child = Command::new("git")
+        .args(["update-index", "--index-info"])
+        .current_dir(&f.a)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(format!("100644 {oid} 1\tconflict.txt\n100644 {oid} 2\tconflict.txt\n100644 {oid} 3\tconflict.txt\n").as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success());
+    assert!(git::working_diff(&repo, "conflict.txt", "staged")
+        .unwrap()
+        .contains("冲突尚未解决"));
+}
+
+#[test]
+fn working_preview_staged_delete_and_recreated_untracked_path_are_independent() {
+    let f = Fixture::new();
+    let repo = git::discover(f.a.to_str().unwrap()).unwrap();
+    g(&f.a, &["rm", "shared.txt"]);
+    fs::write(f.a.join("shared.txt"), "recreated untracked content\n").unwrap();
+    let before = fs::read(f.a.join(".git/index")).unwrap();
+    assert!(git::working_diff(&repo, "shared.txt", "staged")
+        .unwrap()
+        .contains("deleted file"));
+    assert!(git::working_diff(&repo, "shared.txt", "untracked")
+        .unwrap()
+        .contains("recreated untracked content"));
+    assert_eq!(fs::read(f.a.join(".git/index")).unwrap(), before);
+}
+
+#[test]
+fn fetch_and_sync_refresh_safe_custom_tracking_maps_without_touching_local_branches() {
+    let f = Fixture::new();
+    g(
+        &f.a,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/company/*",
+        ],
+    );
+    g(&f.a, &["fetch", "origin"]);
+    g(
+        &f.a,
+        &[
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/heads/*",
+        ],
+    );
+    g(
+        &f.a,
+        &[
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "^refs/heads/excluded",
+        ],
+    );
+    g(&f.b, &["branch", "excluded"]);
+    g(&f.b, &["push", "origin", "excluded"]);
+    let new_head = commit(&f.b, "remote-new", "remote change\n");
+    g(&f.b, &["push"]);
+    let before = g(&f.a, &["rev-parse", "HEAD"]);
+    let fetched = f.service.fetch(f.a.to_str().unwrap(), None).unwrap();
+    assert_eq!(fetched.behind, 1);
+    assert_eq!(g(&f.a, &["rev-parse", "HEAD"]), before);
+    assert_eq!(
+        g(&f.a, &["rev-parse", "refs/remotes/company/main"]),
+        new_head
+    );
+    assert_eq!(f.sync(&f.a).head, new_head);
+    let branches = g(
+        &f.a,
+        &["for-each-ref", "--format=%(refname)", "refs/remotes/"],
+    );
+    assert!(!branches.lines().any(|name| name.ends_with("/excluded")));
+}
+
+#[test]
+fn fetch_only_ignores_dangerous_refspecs_and_preserves_dirty_local_state() {
+    let f = Fixture::new();
+    let remote_head = commit(&f.b, "remote-new", "remote\n");
+    g(&f.b, &["push"]);
+    fs::write(f.a.join("shared.txt"), "dirty\n").unwrap();
+    g(&f.a, &["add", "shared.txt"]);
+    fs::write(f.a.join("shared.txt"), "dirty worktree\n").unwrap();
+    let head = g(&f.a, &["rev-parse", "HEAD"]);
+    let index = fs::read(f.a.join(".git/index")).unwrap();
+    g(
+        &f.a,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/heads/*",
+        ],
+    );
+    g(&f.a, &["config", "fetch.prune", "true"]);
+    g(&f.a, &["update-ref", "refs/remotes/origin/keep", &head]);
+    let s = f.service.fetch(f.a.to_str().unwrap(), None).unwrap();
+    assert!(s.last_fetched.is_some());
+    assert_eq!(
+        g(&f.a, &["rev-parse", "refs/remotes/origin/main"]),
+        remote_head
+    );
+    assert_eq!(g(&f.a, &["rev-parse", "refs/remotes/origin/keep"]), head);
+    assert_eq!(g(&f.a, &["rev-parse", "HEAD"]), head);
+    assert_eq!(fs::read(f.a.join(".git/index")).unwrap(), index);
+    assert_eq!(
+        fs::read_to_string(f.a.join("shared.txt")).unwrap(),
+        "dirty worktree\n"
+    );
+    let old_time = s.last_fetched;
+    g(
+        &f.a,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            f.root.join("missing.git").to_str().unwrap(),
+        ],
+    );
+    assert!(f.service.fetch(f.a.to_str().unwrap(), None).is_err());
+    assert_eq!(f.status(&f.a).last_fetched, old_time);
+    assert!(f.service.fetch(f.b.to_str().unwrap(), None).is_ok());
+}
+
+#[test]
+fn fetch_remote_selection_empty_detached_and_worktree_time() {
+    let f = Fixture::new();
+    g(&f.a, &["config", "--unset", "branch.main.remote"]);
+    g(
+        &f.a,
+        &["remote", "add", "second", f.remote.to_str().unwrap()],
+    );
+    assert_eq!(
+        f.service
+            .fetch(f.a.to_str().unwrap(), None)
+            .unwrap_err()
+            .kind,
+        "remote"
+    );
+    assert!(f
+        .service
+        .fetch(f.a.to_str().unwrap(), Some("second"))
+        .is_ok());
+    g(&f.a, &["checkout", "--detach"]);
+    assert!(f.service.fetch(f.a.to_str().unwrap(), None).is_err());
+    g(&f.a, &["remote", "remove", "second"]);
+    assert!(f.service.fetch(f.a.to_str().unwrap(), None).is_ok());
+    let wt = f.root.join("linked");
+    g(
+        &f.a,
+        &["worktree", "add", "-b", "linked", wt.to_str().unwrap()],
+    );
+    f.service.add(wt.to_str().unwrap()).unwrap();
+    assert_eq!(f.status(&wt).last_fetched, f.status(&f.a).last_fetched);
+    let empty = f.root.join("empty-fetch");
+    g(&f.root, &["init", empty.to_str().unwrap()]);
+    f.service.add(empty.to_str().unwrap()).unwrap();
+    assert!(f.service.fetch(empty.to_str().unwrap(), None).is_err());
+    g(
+        &empty,
+        &["remote", "add", "origin", f.remote.to_str().unwrap()],
+    );
+    assert!(f.service.fetch(empty.to_str().unwrap(), None).is_ok());
+    assert_eq!(f.status(&empty).head, "(initial)");
+}
 fn g(path: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)

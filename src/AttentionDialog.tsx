@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { api } from "./api";
 import { Dialog } from "./Dialog";
+import { WorkingDiff } from "./WorkingDiff";
 import { attention, workingFileLabel, workingFileKind } from "./attention";
 import {
   errorText,
@@ -15,9 +16,11 @@ function WorkingFiles({ path }: { path: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
+  const [selectedFile, setSelectedFile] = useState<ChangedFile | null>(null);
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setSelectedFile(null);
     setError("");
     void api
       .workingChanges(path)
@@ -51,14 +54,17 @@ function WorkingFiles({ path }: { path: string }) {
                 <span className="working-label">
                   {workingFileLabel(file.status)}
                 </span>
-                <span
+                <button
+                  className="text-btn working-path"
+                  onClick={() => setSelectedFile(file)}
+                  aria-label={`预览 ${file.path}`}
                   title={
                     file.oldPath ? `${file.oldPath} → ${file.path}` : file.path
                   }
                 >
                   {file.oldPath && <small>{file.oldPath} → </small>}
                   {file.path}
-                </span>
+                </button>
                 <span
                   className="working-kind"
                   title={`Git 状态：${file.status}`}
@@ -79,6 +85,13 @@ function WorkingFiles({ path }: { path: string }) {
       >
         {error ? "重试文件列表" : "刷新文件列表"}
       </button>
+      {!loading && selectedFile && (
+        <WorkingDiff
+          key={`${path}:${retry}:${selectedFile.path}:${selectedFile.status}`}
+          path={path}
+          file={selectedFile}
+        />
+      )}
     </div>
   );
 }

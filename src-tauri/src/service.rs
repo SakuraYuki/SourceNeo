@@ -13,6 +13,8 @@ struct Saved {
     repos: Vec<Repo>,
     #[serde(default)]
     fetched: HashMap<String, u64>,
+    #[serde(default)]
+    tools: crate::tools::ToolSettings,
 }
 struct Gate {
     count: Mutex<usize>,
@@ -89,6 +91,24 @@ impl Service {
     }
     pub fn list(&self) -> Vec<Repo> {
         self.saved.lock().unwrap().repos.clone()
+    }
+    pub fn tool_settings(&self) -> crate::tools::ToolSettings {
+        self.saved.lock().unwrap().tools.clone()
+    }
+    pub fn save_tool_settings(&self, settings: crate::tools::ToolSettings) -> Result<()> {
+        let mut saved = self.saved.lock().unwrap();
+        let old = std::mem::replace(&mut saved.tools, settings);
+        if let Err(e) = self.persist(&saved) {
+            saved.tools = old;
+            return Err(e);
+        }
+        Ok(())
+    }
+    pub fn open_tool(&self, path: &str, kind: &str) -> Result<()> {
+        self.with_repo(path, Access::ReadOnly, |repo| {
+            let spec = crate::tools::plan(&repo.path, kind, &self.tool_settings(), cfg!(windows))?;
+            crate::tools::launch(&spec)
+        })
     }
     pub fn add(&self, path: &str) -> Result<Repo> {
         let repo = {
@@ -218,6 +238,38 @@ impl Service {
     pub fn working_changes(&self, path: &str) -> Result<Vec<ChangedFile>> {
         self.with_repo(path, Access::ReadOnly, git::working_changes)
     }
+    pub fn working_diff(&self, path: &str, file: &str, side: &str) -> Result<String> {
+        self.with_repo(path, Access::ReadOnly, |repo| {
+            git::working_diff(repo, file, side)
+        })
+    }
+    pub fn fetch_remotes(&self, path: &str) -> Result<Vec<String>> {
+        self.with_repo(path, Access::ReadOnly, git::fetch_remotes)
+    }
+    pub fn fetch(&self, path: &str, remote: Option<&str>) -> Result<RepoStatus> {
+        let result = self.with_repo(path, Access::Write, |repo| {
+            git::check_locks(repo)?;
+            git::fetch_only(repo, remote)?;
+            let mut saved = self.saved.lock().unwrap();
+            let old = saved.fetched.insert(repo.common_dir.clone(), now());
+            if let Err(e) = self.persist(&saved) {
+                if let Some(time) = old {
+                    saved.fetched.insert(repo.common_dir.clone(), time);
+                } else {
+                    saved.fetched.remove(&repo.common_dir);
+                }
+                return Err(e);
+            }
+            drop(saved);
+            self.errors.lock().unwrap().remove(path);
+            self.raw_status(repo)
+        });
+        match &result {
+            Ok(_) => self.log(path, "success", "已仅获取远端；本地分支和文件保持原状"),
+            Err(e) => self.log(path, "error", format!("获取失败：{}", e.message)),
+        }
+        result
+    }
     pub fn commit_changes(&self, path: &str, hash: &str) -> Result<CommitChanges> {
         self.with_repo(path, Access::ReadOnly, |repo| {
             git::commit_changes(repo, hash)
@@ -346,16 +398,7 @@ impl Service {
             ));
         }
         self.log(&repo.path, "info", format!("获取远程更新 · {remote}"));
-        git::run(
-            path,
-            &[
-                "fetch",
-                "--no-recurse-submodules",
-                "--no-auto-maintenance",
-                "--",
-                remote,
-            ],
-        )?;
+        git::fetch_only(repo, Some(remote))?;
         {
             let mut saved = self.saved.lock().unwrap();
             saved.fetched.insert(repo.common_dir.clone(), now());
