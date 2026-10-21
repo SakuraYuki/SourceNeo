@@ -1,5 +1,61 @@
 # 第一版验收记录
 
+## 2026-10-21 同步审查修复版本 Windows 安装包
+
+在全部同步改动审查修复通过后，重新执行 `npm run desktop:build -- --bundles nsis`，前端生产构建、Rust Release 及 NSIS x64 打包成功。交付为 `artifacts/SourceNeo_0.1.0_x64-sync-reviewed-setup.exe`，大小 2,264,187 字节，SHA-256 为 `850487A6460FFE50971AF1476AA0DFA388E9176573CD4DB8D00B30BD65418675`，附同名 `.sha256` 文件；安装包按现有忽略规则保留在本机，不纳入源码提交。
+
+复用紧接本次提交前完成的 67 项 Rust 测试、Clippy、Rustfmt 和差异检查，以及未改动前端的 64 项测试结果；正式打包再次执行前端生产构建。本次只打包，不更新或重启已安装应用，不读取或操作业务仓库、仓库列表或应用配置，不推送。下面审查阶段“未打包”记录指当时，本节记录后续交付。
+
+## 2026-10-21 全部同步改动审查与修复
+
+范围为 `git diff HEAD` 的全部净变化及未跟踪的 `sync_policy.rs`，暂存区为空。复查 rebase、冲突暂停、按路径保护、调用方提示和交付记录，未扩大为全仓巡检。发现并修复以下问题，前五项均先用临时仓库回归复现失败：
+
+- Windows 中 `Config.json` 与忽略的 `config.json` 指向同一文件，但原字面 pathspec 区分大小写，保护会漏检并继续同步。查询现按 Windows / `core.ignoreCase` 语义匹配大小写，覆盖文件本身和阻挡目录的父文件；分批长度计算同时纳入新增 pathspec 标志。
+- 旧 fork point 仍属于新 upstream 时，原实现仍从旧点重放，导致远端已采纳的本地提交再次重放并产生多余冲突。现以本次 upstream 排除已有提交，仅在旧 fork point 被远端改写移除时保留旧点。
+- 远端纯回退时 `behind == 0`，原实现会跳过 rebase，普通推送重新恢复远端已撤回的提交。现按 rebase 配置整合此情况，保留未发布的本地工作，并增加回退时忽略文件仍受保护的测试。
+- `pull.rebase=true` 时硬编码 `--no-rebase-merges`，覆盖了用户的 `rebase.rebaseMerges=true` 并压平合并拓扑。现普通 rebase 继承该配置，只有显式 `pull.rebase=merges` 才追加对应命令选项。
+- 快进后只检查祖先关系，`post-merge` hook 新增提交后也可能被自动推送。现明确快进时恢复 HEAD 必须等于本次获取目标的检查，出现额外提交则停止后续推送。
+
+另补充冲突文件解决并暂存、但尚未 continue 的中间状态验证：再次同步保持暂停、index 不变且远端不变，外部完成当前操作后才能恢复正常同步。配置与 fork point 语义对照 [Git 配置文档](https://git-scm.com/docs/git-config) 和 [Git 2.53 pull 源码](https://github.com/git/git/blob/v2.53.0/builtin/pull.c)。
+
+修复后的定向回归及完整 Rust 回归均通过：62 项临时 Git 场景及 5 项单元测试，共 67 项。Clippy（含桌面功能及所有 targets，`-D warnings`）、Rustfmt 与 `git diff --check` 通过。前端本轮未改动，复用实现阶段 64 项测试及前端生产构建通过的结果。复审后未发现其他阻塞项。
+
+测试只使用临时仓库及本地 bare remote，未读取或操作业务仓库、现有仓库列表或应用配置，未提交或推送工作区改动。未重新打包或更新已安装应用；此前安装包记录对应本轮审查修复前的版本。
+
+## 2026-10-21 仅检查同步涉及路径，修复大忽略目录阻断
+
+移除 rebase 前无路径限制的忽略文件枚举与 upstream 全树路径列表。现在从 `HEAD → upstream` 原始差异及实际 `replay_base..HEAD` 待重放提交的原始差异收集路径（含合并和中间提交），仅检查这些路径及阻挡写入的父文件 / 链接。查询使用字面 pathspec、按 Windows 命令行长度分批；没有候选路径时不调用查询。只读 `ls-files` 返回第一项覆盖风险后即停止读取并结束该查询，不收集完整忽略清单；一般 Git 命令的 8 MiB 输出保护保持不变。
+
+新增临时仓库回归：45,000 个无关忽略缓存文件，完整文件名清单超过 8 MiB，旧实现已复现 `outputLimit`；同时覆盖该缓存目录确实被替换为文件时必须保护、中间提交创建又删除的特殊名称路径、忽略文件与目录互换，以及正常跟踪目录替换为文件不应被误拦截。原始路径解析另覆盖换行、冒号和不完整记录。所有测试只使用临时仓库与本地 bare remote，未操作业务仓库、提交或推送当前工作区。
+
+前端 64 项测试、完整 Rust 回归 61 项（56 项临时 Git 场景及 5 项单元测试）、Prettier、Rustfmt、Clippy（含桌面功能及所有 targets，`-D warnings`）和差异格式检查均通过。45,000 文件的大目录回归由旧版 `outputLimit` 失败转为通过，真实覆盖风险仍返回 `changed` 并保留目录、文件及远端提交。
+
+`npm run desktop:build -- --bundles nsis` 成功，包含前端生产构建和 Rust Release。安装包为 `artifacts/SourceNeo_0.1.0_x64-scoped-sync-setup.exe`，大小 2,259,758 字节，SHA-256 为 `5F2D722F1743E5B16410C92694F5072DED60CFCB9D94A8F5972B6A688EB5D304`，附同名校验文件。
+
+正常关闭旧应用后备份最新配置、WebView 界面偏好和旧程序，以 `/S /UPDATE /NS` 更新，退出码 0；15 个配置 / 偏好文件安装前后哈希一致，16 个仓库保留。安装版与本次构建的 NSIS payload 完全一致，SHA-256 为 `BA131FED477FD61FB6AAC76D141B6E86116814B16F26AD23AE07578888A21731`。启动后 SourceNeo 主窗口响应正常，仓库与工具配置仍与备份逐字节一致。备份目录为 `%TEMP%\sourceneo-scoped-ignore-update-97acf4a21a1e4136a8ac6e9281d07546`。
+
+本轮未读取或操作业务仓库，未点击 Fetch / 同步；业务仓库的实际同步留给用户验收。未提交或推送当前工作区改动。
+
+## 2026-10-21 Git 配置同步版本 Windows 验收包
+
+在当前未提交源码上执行 `npm run desktop:build -- --bundles nsis`，前端生产构建及 Rust Release 构建成功。安装包为 `artifacts/SourceNeo_0.1.0_x64-sync-setup.exe`，大小 2,263,612 字节，SHA-256 为 `0FE9F9896C8A0447ED55A8B690EB87484F04DF433F1E2E7F8D538B88A8AF711B`，同目录附校验文件。
+
+正常关闭旧应用，备份最新仓库与工具配置、窗口设置、WebView 界面偏好及旧程序，使用 `/S /UPDATE /NS` 更新原安装位置，退出码 0。安装后的程序与本次构建的 NSIS payload 完全一致（相对于原始 release 程序仅转换预期的 NSIS 包类型标记），安装版 SHA-256 为 `DC2AAC927B39BAA4467EB41A7B5D577A548F82F80DBD7B533391A569B5D2964E`。15 个配置 / 偏好文件安装前后哈希一致，16 个仓库保留；启动后主窗口标题为 SourceNeo、响应正常，仓库与工具配置仍与备份逐字节一致。备份目录为 `%TEMP%\sourceneo-sync-update-c70e1ef9cb8d4cf5a0271d8a240ce780`。
+
+未点击 Fetch 或同步，未操作业务仓库，未提交或推送；同步行为待用户在更新后的应用中验收。下节“未打包、重启或更新”指源码实现阶段，本节记录其后的交付。
+
+## 2026-10-21 按 Git 配置同步与 rebase 冲突暂停
+
+在当前目录实现，未操作业务仓库、现有仓库列表或应用配置，未创建 worktree、提交或推送工作区改动。所有 Git 场景只使用临时仓库与本地 bare remote。
+
+同步改为读取 Git 有效配置，按 `branch.<name>.rebase`、`pull.rebase`、`pull.ff` 选择 rebase / merge / 仅快进；支持 `merges` 保留拓扑，interactive 模式提示到终端完成，缺少策略的分叉仍暂停并提示配置。保留未提交改动，不启用 autostash，rebase 禁止修改其他分支，并预检被忽略文件。fetch 前记录 fork point，避免远端改写后将已撤回的 upstream 提交重新推回。
+
+merge / rebase 冲突返回明确的冲突状态、操作名称、文件清单和未推送提示；再次同步保留文件与 index，外部完成操作后才能继续普通推送。更新了仓库提示、诊断、页脚和 README。
+
+专项 9 项 rebase 测试通过，覆盖分叉整合和普通推送、分支配置覆盖 include 配置、merge 与 rebase 冲突及外部完成后的同步、ff-only 与 no-ff、仅落后快进、保留合并拓扑、远端改写、未提交与被忽略文件保护。前端 64 项测试、生产构建、Prettier、Clippy（含桌面功能及所有 targets，`-D warnings`）及 Rustfmt 通过。完整 Rust 回归通过：52 项临时 Git 场景及 4 项单元测试，共 56 项；`git diff --check` 通过。
+
+本轮未打包、重启或更新本机已安装的应用。
+
 ## 2026-10-21 审查修复后的 Windows 交付
 
 在下述审查修复通过后，重新执行 `npm run desktop:build -- --bundles nsis`，优化正式构建及 NSIS x64 打包通过。安装包为 `artifacts/SourceNeo_0.1.0_x64-reviewed-setup.exe`（仍沿用 `0.1.0` 版本号），SHA-256：`2BA564094C68DF694D27D11EA32AA6E5F140488CB6EAE17C0478EDC6B9538D26`，相邻 `.sha256` 文件可用于校验。构建产物按现有 `.gitignore` 保留在本机，不纳入源码提交。

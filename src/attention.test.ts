@@ -46,3 +46,20 @@ it("distinguishes staged, unstaged, untracked, renamed and conflicted files", ()
     expect(workingFileKind(code)).toBe(kind);
   }
 });
+
+it("identifies the paused operation for rebase and merge conflicts", () => {
+  for (const operation of ["rebase", "merge"]) {
+    const info = attention({
+      ...status,
+      kind: "conflict",
+      operation,
+      conflicts: ["shared.txt"],
+    });
+    expect(info.label).toContain(operation);
+    expect(info.action).toContain("未推送");
+    expect(info.action).toContain(`继续或中止 ${operation}`);
+  }
+  expect(
+    attention({ ...status, kind: "diverged", ahead: 1, behind: 1 }).action,
+  ).toContain("pull.rebase");
+});

@@ -1,6 +1,7 @@
 pub mod git;
 pub mod model;
 pub mod service;
+mod sync_policy;
 pub mod tools;
 
 #[cfg(feature = "desktop")]

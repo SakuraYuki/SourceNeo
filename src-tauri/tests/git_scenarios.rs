@@ -380,6 +380,551 @@ fn divergence_does_not_merge_or_rebase() {
     assert_eq!(g(&f.remote, &["rev-parse", "main"]), remote);
     assert!(!f.a.join(".git/MERGE_HEAD").exists());
 }
+
+fn sync_identity(path: &Path) {
+    g(path, &["config", "user.name", "SourceNeo Test"]);
+    g(path, &["config", "user.email", "test@example.invalid"]);
+    g(path, &["config", "commit.gpgsign", "false"]);
+}
+
+#[cfg(windows)]
+#[test]
+fn review_ignored_case_variant_file_and_parent_are_preserved() {
+    for parent in [false, true] {
+        let f = Fixture::new();
+        sync_identity(&f.a);
+        g(&f.a, &["config", "pull.rebase", "true"]);
+        g(&f.a, &["config", "core.ignoreCase", "true"]);
+        let local = commit(&f.a, "local.txt", "local work\n");
+        fs::write(f.a.join(".git/info/exclude"), "config.json\nartifact\n").unwrap();
+        let (saved, remote) = if parent {
+            fs::create_dir(f.b.join("Artifact")).unwrap();
+            (
+                "artifact",
+                commit(&f.b, "Artifact/remote.txt", "remote work\n"),
+            )
+        } else {
+            (
+                "config.json",
+                commit(&f.b, "Config.json", "remote config\n"),
+            )
+        };
+        fs::write(f.a.join(saved), "precious local config\n").unwrap();
+        g(&f.b, &["push"]);
+        let result = f.service.sync(f.a.to_str().unwrap());
+        assert!(
+            result.is_err(),
+            "case variant must not overwrite ignored content: {result:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(f.a.join(saved)).unwrap(),
+            "precious local config\n"
+        );
+        assert_eq!(g(&f.a, &["rev-parse", "HEAD"]), local);
+        assert_eq!(g(&f.remote, &["rev-parse", "main"]), remote);
+    }
+}
+
+#[test]
+fn review_rebase_merges_config_is_honored_without_pull_merges_flag() {
+    let f = Fixture::new();
+    sync_identity(&f.a);
+    g(&f.a, &["config", "pull.rebase", "true"]);
+    g(&f.a, &["config", "rebase.rebaseMerges", "true"]);
+    g(&f.a, &["switch", "-c", "side"]);
+    commit(&f.a, "side.txt", "side work\n");
+    g(&f.a, &["switch", "main"]);
+    commit(&f.a, "local.txt", "local work\n");
+    g(&f.a, &["merge", "--no-ff", "--no-edit", "side"]);
+    let remote = commit(&f.b, "remote.txt", "remote work\n");
+    g(&f.b, &["push"]);
+    assert_eq!(f.sync(&f.a).kind, StatusKind::Synced);
+    assert_eq!(
+        g(
+            &f.a,
+            &[
+                "rev-list",
+                "--merges",
+                "--count",
+                &format!("{remote}..HEAD")
+            ]
+        ),
+        "1"
+    );
+}
+
+#[test]
+fn review_rebase_excludes_local_commits_already_contained_in_fetched_upstream() {
+    let f = Fixture::new();
+    sync_identity(&f.a);
+    g(&f.a, &["config", "pull.rebase", "true"]);
+    commit(&f.a, "shared.txt", "intermediate shared change\n");
+    // A colleague adopts this commit without updating alpha's upstream reflog.
+    g(&f.b, &["fetch", f.a.to_str().unwrap(), "main"]);
+    g(&f.b, &["merge", "--ff-only", "FETCH_HEAD"]);
+    let remote = commit(&f.b, "shared.txt", "newer shared change\n");
+    g(&f.b, &["push"]);
+    commit(&f.a, "local.txt", "only local work to replay\n");
+    let result = f.sync(&f.a);
+    assert_eq!(
+        result.kind,
+        StatusKind::Synced,
+        "already upstream commit must not be replayed into a conflict"
+    );
+    assert_eq!(g(&f.a, &["rev-parse", "HEAD^"]), remote);
+    assert_eq!(
+        fs::read_to_string(f.a.join("shared.txt")).unwrap(),
+        "newer shared change\n"
+    );
+}
+
+#[test]
+fn review_rebase_remote_rewind_does_not_restore_withdrawn_commits() {
+    let f = Fixture::new();
+    sync_identity(&f.a);
+    g(&f.a, &["config", "pull.rebase", "true"]);
+    let base = g(&f.a, &["rev-parse", "HEAD"]);
+    commit(&f.a, "withdrawn.txt", "withdraw this upstream commit\n");
+    g(&f.a, &["push"]);
+    commit(&f.a, "local.txt", "keep unpublished work\n");
+    // beta still points at base; only this temporary bare remote is rewound.
+    g(&f.b, &["push", "--force", "origin", "main"]);
+    let result = f.sync(&f.a);
+    assert_eq!(result.kind, StatusKind::Synced);
+    assert_eq!(g(&f.a, &["rev-parse", "HEAD^"]), base);
+    assert!(!f.a.join("withdrawn.txt").exists());
+    assert_eq!(
+        fs::read_to_string(f.a.join("local.txt")).unwrap(),
+        "keep unpublished work\n"
+    );
+}
+
+#[test]
+fn review_rebase_remote_rewind_still_protects_ignored_files() {
+    let f = Fixture::new();
+    sync_identity(&f.a);
+    g(&f.a, &["config", "pull.rebase", "true"]);
+    let base = g(&f.a, &["rev-parse", "HEAD"]);
+    g(&f.a, &["rm", "shared.txt"]);
+    g(&f.a, &["commit", "-m", "delete shared file upstream"]);
+    g(&f.a, &["push"]);
+    let local = commit(&f.a, "local.txt", "keep local work\n");
+    fs::write(f.a.join(".git/info/exclude"), "shared.txt\n").unwrap();
+    fs::write(f.a.join("shared.txt"), "precious local ignored contents\n").unwrap();
+    g(&f.b, &["push", "--force", "origin", "main"]);
+    let result = f.service.sync(f.a.to_str().unwrap()).unwrap_err();
+    assert_eq!(result.kind, "changed");
+    assert!(result.message.contains("被忽略文件"));
+    assert_eq!(g(&f.a, &["rev-parse", "HEAD"]), local);
+    assert_eq!(g(&f.remote, &["rev-parse", "main"]), base);
+    assert_eq!(
+        fs::read_to_string(f.a.join("shared.txt")).unwrap(),
+        "precious local ignored contents\n"
+    );
+}
+
+#[test]
+fn review_fast_forward_hook_head_change_stops_before_push() {
+    let f = Fixture::new();
+    sync_identity(&f.a);
+    g(&f.a, &["config", "pull.rebase", "true"]);
+    let remote = commit(&f.b, "remote.txt", "remote work\n");
+    g(&f.b, &["push"]);
+    let hook = f.a.join(".git/hooks/post-merge");
+    fs::write(
+        &hook,
+        "#!/bin/sh\ngit -c commit.gpgsign=false commit --allow-empty -m 'unexpected hook commit'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let result = f.service.sync(f.a.to_str().unwrap());
+    assert!(
+        result.is_err(),
+        "unexpected hook commit must not be pushed: {result:?}"
+    );
+    assert_eq!(g(&f.remote, &["rev-parse", "main"]), remote);
+    assert_ne!(g(&f.a, &["rev-parse", "HEAD"]), remote);
+}
+
+#[test]
+fn configured_rebase_integrates_divergence_then_pushes_only_current_branch() {
+    let f = Fixture::new();
+    sync_identity(&f.a);
+    g(&f.a, &["config", "pull.rebase", "true"]);
+    g(&f.a, &["config", "rebase.updateRefs", "true"]);
+    let original = commit(&f.a, "local.txt", "local\n");
+    g(&f.a, &["branch", "keep-local", &original]);
+    let remote = commit(&f.b, "remote.txt", "remote\n");
+    g(&f.b, &["push"]);
+    let config = fs::read(f.a.join(".git/config")).unwrap();
+    let result = f.sync(&f.a);
+    assert_eq!(result.kind, StatusKind::Synced);
+    assert_ne!(result.head, original);
+    assert_eq!(g(&f.a, &["rev-parse", "HEAD^"]), remote);
+    assert_eq!(g(&f.a, &["rev-parse", "keep-local"]), original);
+    assert_eq!(g(&f.remote, &["rev-parse", "main"]), result.head);
+    assert_eq!(
+        g(
+            &f.remote,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/"]
+        ),
+        "refs/heads/main"
+    );
+    assert_eq!(fs::read(f.a.join(".git/config")).unwrap(), config);
+    assert!(f.a.join("remote.txt").exists() && f.a.join("local.txt").exists());
+}
+
+#[test]
+fn branch_rebase_overrides_pull_and_included_configuration() {
+    for (pull, branch, expect_merge) in [("true", "false", true), ("false", "true", false)] {
+        let f = Fixture::new();
+        sync_identity(&f.a);
+        let included = f.root.join("sync-config");
+        fs::write(&included, format!("[pull]\n\trebase = {pull}\n")).unwrap();
+        g(
+            &f.a,
+            &["config", "include.path", included.to_str().unwrap()],
+        );
+        g(&f.a, &["config", "branch.main.rebase", branch]);
+        let local = commit(&f.a, "local.txt", "local\n");
+        let remote = commit(&f.b, "remote.txt", "remote\n");
+        g(&f.b, &["push"]);
+        let result = f.sync(&f.a);
+        assert_eq!(result.kind, StatusKind::Synced);
+        if expect_merge {
+            assert_eq!(g(&f.a, &["rev-parse", "HEAD^1"]), local);
+            assert_eq!(g(&f.a, &["rev-parse", "HEAD^2"]), remote);
+        } else {
+            assert_eq!(g(&f.a, &["rev-parse", "HEAD^"]), remote);
+        }
+    }
+}
+
+#[test]
+fn rebase_and_merge_conflicts_pause_preserve_state_and_never_push() {
+    for (config, operation) in [("true", "rebase"), ("false", "merge")] {
+        let f = Fixture::new();
+        sync_identity(&f.a);
+        g(&f.a, &["config", "pull.rebase", config]);
+        let local = commit(&f.a, "shared.txt", "local conflict\n");
+        let remote = commit(&f.b, "shared.txt", "remote conflict\n");
+        g(&f.b, &["push"]);
+        let result = f.sync(&f.a);
+        assert_eq!(result.kind, StatusKind::Conflict);
+        assert_eq!(result.conflicts, vec!["shared.txt"]);
+        assert_eq!(result.operation.as_deref(), Some(operation));
+        assert!(result.message.contains(&format!("{operation} 发生冲突")));
+        assert!(result.message.contains("未推送"));
+        assert_eq!(g(&f.a, &["rev-parse", "main"]), local);
+        assert_eq!(g(&f.remote, &["rev-parse", "main"]), remote);
+        let contents = fs::read(f.a.join("shared.txt")).unwrap();
+        let index = fs::read(f.a.join(".git/index")).unwrap();
+        assert_eq!(f.sync(&f.a).kind, StatusKind::Conflict);
+        assert_eq!(fs::read(f.a.join("shared.txt")).unwrap(), contents);
+        assert_eq!(fs::read(f.a.join(".git/index")).unwrap(), index);
+        let refreshed = f.status(&f.a);
+        assert_eq!(refreshed.kind, StatusKind::Conflict);
+        assert!(refreshed.message.contains(operation));
+        assert!(f
+            .service
+            .diagnostic(f.a.to_str().unwrap())
+            .unwrap()
+            .contains(operation));
+        // Simulate resolving and finishing in an external Git tool. A later sync
+        // can push normally; the paused call above never changed the remote.
+        fs::write(f.a.join("shared.txt"), "resolved contents\n").unwrap();
+        g(&f.a, &["add", "shared.txt"]);
+        let staged = fs::read(f.a.join(".git/index")).unwrap();
+        let paused = f.sync(&f.a);
+        assert_eq!(paused.kind, StatusKind::Attention);
+        assert_eq!(paused.operation.as_deref(), Some(operation));
+        assert_eq!(fs::read(f.a.join(".git/index")).unwrap(), staged);
+        assert_eq!(g(&f.remote, &["rev-parse", "main"]), remote);
+        if operation == "rebase" {
+            g(&f.a, &["-c", "core.editor=true", "rebase", "--continue"]);
+        } else {
+            g(&f.a, &["commit", "-m", "resolve merge"]);
+        }
+        let completed = f.sync(&f.a);
+        assert_eq!(completed.kind, StatusKind::Synced);
+        assert_eq!(g(&f.remote, &["rev-parse", "main"]), completed.head);
+    }
+}
+
+#[test]
+fn pull_ff_only_overrides_rebase_and_no_ff_overrides_merge_ff() {
+    let f = Fixture::new();
+    g(&f.a, &["config", "pull.rebase", "true"]);
+    g(&f.a, &["config", "pull.ff", "only"]);
+    let local = commit(&f.a, "local.txt", "local\n");
+    let remote = commit(&f.b, "remote.txt", "remote\n");
+    g(&f.b, &["push"]);
+    let result = f.sync(&f.a);
+    assert_eq!(result.kind, StatusKind::Diverged);
+    assert!(result.message.contains("pull.ff=only"));
+    assert_eq!(result.head, local);
+    assert_eq!(g(&f.remote, &["rev-parse", "main"]), remote);
+
+    let f = Fixture::new();
+    sync_identity(&f.a);
+    g(&f.a, &["config", "pull.rebase", "false"]);
+    g(&f.a, &["config", "pull.ff", "false"]);
+    g(&f.a, &["config", "merge.ff", "only"]);
+    let old = g(&f.a, &["rev-parse", "HEAD"]);
+    let remote = commit(&f.b, "remote.txt", "remote\n");
+    g(&f.b, &["push"]);
+    let result = f.sync(&f.a);
+    assert_eq!(result.kind, StatusKind::Synced);
+    assert_eq!(g(&f.a, &["rev-parse", "HEAD^1"]), old);
+    assert_eq!(g(&f.a, &["rev-parse", "HEAD^2"]), remote);
+}
+
+#[test]
+fn configured_rebase_without_local_commits_fast_forwards() {
+    let f = Fixture::new();
+    g(&f.a, &["config", "pull.rebase", "true"]);
+    g(&f.a, &["config", "pull.ff", "false"]);
+    let remote = commit(&f.b, "remote.txt", "remote\n");
+    g(&f.b, &["push"]);
+    assert_eq!(f.sync(&f.a).head, remote);
+}
+
+#[test]
+fn interactive_and_invalid_policy_never_rewrite_or_push() {
+    for (key, value) in [
+        ("pull.rebase", "interactive"),
+        ("pull.rebase", "invalid"),
+        ("pull.ff", "invalid"),
+    ] {
+        let f = Fixture::new();
+        g(&f.a, &["config", key, value]);
+        let local = commit(&f.a, "local.txt", "local\n");
+        let remote = commit(&f.b, "remote.txt", "remote\n");
+        g(&f.b, &["push"]);
+        let result = f.service.sync(f.a.to_str().unwrap());
+        if value == "interactive" {
+            let result = result.unwrap();
+            assert_eq!(result.kind, StatusKind::Attention);
+            assert!(result.message.contains("interactive rebase"));
+        } else {
+            assert!(result.is_err());
+        }
+        assert_eq!(g(&f.a, &["rev-parse", "HEAD"]), local);
+        assert_eq!(g(&f.remote, &["rev-parse", "main"]), remote);
+        assert_eq!(g(&f.a, &["status", "--porcelain"]), "");
+    }
+}
+
+#[test]
+fn rebase_protects_dirty_and_ignored_files_even_with_autostash_configured() {
+    let f = Fixture::new();
+    sync_identity(&f.a);
+    g(&f.a, &["config", "pull.rebase", "true"]);
+    g(&f.a, &["config", "rebase.autoStash", "true"]);
+    let local = commit(&f.a, "local.txt", "local\n");
+    let remote = commit(&f.b, "precious.txt", "remote tracked content\n");
+    g(&f.b, &["push"]);
+    fs::write(f.a.join("shared.txt"), "dirty content\n").unwrap();
+    assert_eq!(f.sync(&f.a).kind, StatusKind::Attention);
+    assert_eq!(
+        fs::read_to_string(f.a.join("shared.txt")).unwrap(),
+        "dirty content\n"
+    );
+    fs::write(f.a.join("shared.txt"), "base\n").unwrap();
+    fs::write(f.a.join(".git/info/exclude"), "precious.txt\n").unwrap();
+    fs::write(f.a.join("precious.txt"), "precious ignored content\n").unwrap();
+    let error = f.service.sync(f.a.to_str().unwrap()).unwrap_err();
+    assert!(error.message.contains("被忽略文件"));
+    assert_eq!(
+        fs::read_to_string(f.a.join("precious.txt")).unwrap(),
+        "precious ignored content\n"
+    );
+    assert_eq!(g(&f.a, &["rev-parse", "HEAD"]), local);
+    assert_eq!(g(&f.remote, &["rev-parse", "main"]), remote);
+    fs::remove_file(f.a.join("precious.txt")).unwrap();
+    fs::write(f.a.join(".git/info/exclude"), "build-cache/\n").unwrap();
+    fs::create_dir(f.a.join("build-cache")).unwrap();
+    fs::write(f.a.join("build-cache/keep.bin"), "unrelated ignored cache").unwrap();
+    assert_eq!(f.sync(&f.a).kind, StatusKind::Synced);
+    assert_eq!(
+        fs::read_to_string(f.a.join("build-cache/keep.bin")).unwrap(),
+        "unrelated ignored cache"
+    );
+}
+
+#[test]
+fn rebase_ignored_large_unrelated_tree_does_not_limit_sync_or_hide_real_blockers() {
+    let f = Fixture::new();
+    sync_identity(&f.a);
+    g(&f.a, &["config", "pull.rebase", "true"]);
+    g(&f.a, &["config", "core.longpaths", "true"]);
+    let cache = format!("ignored-cache-{}", "c".repeat(90));
+    fs::create_dir(f.a.join(&cache)).unwrap();
+    fs::write(f.a.join(".git/info/exclude"), format!("{cache}/\n")).unwrap();
+    let mut listed_bytes = 0;
+    for index in 0..45_000 {
+        let name = format!("{index:05}-{}.bin", "x".repeat(100));
+        listed_bytes += cache.len() + name.len() + 2;
+        fs::File::create(f.a.join(&cache).join(name)).unwrap();
+    }
+    assert!(listed_bytes > 8 * 1024 * 1024);
+    commit(&f.a, "local.txt", "local work\n");
+    commit(&f.b, "remote.txt", "remote work\n");
+    g(&f.b, &["push"]);
+    assert_eq!(f.sync(&f.a).kind, StatusKind::Synced);
+    // The same large directory must block when the remote replaces it with a
+    // file, without listing its entire contents or returning outputLimit.
+    g(&f.b, &["pull", "--ff-only"]);
+    commit(&f.a, "more-local.txt", "more local work\n");
+    let local = g(&f.a, &["rev-parse", "HEAD"]);
+    let remote = commit(&f.b, &cache, "remote file replaces directory\n");
+    g(&f.b, &["push"]);
+    let error = f.service.sync(f.a.to_str().unwrap()).unwrap_err();
+    assert_eq!(error.kind, "changed");
+    assert!(error.message.contains("被忽略文件"));
+    assert_eq!(g(&f.a, &["rev-parse", "HEAD"]), local);
+    assert_eq!(g(&f.remote, &["rev-parse", "main"]), remote);
+    assert_eq!(fs::read_dir(f.a.join(cache)).unwrap().count(), 45_000);
+}
+
+#[test]
+fn rebase_ignored_intermediate_replay_path_is_protected_with_literal_names() {
+    let f = Fixture::new();
+    sync_identity(&f.a);
+    g(&f.a, &["config", "pull.rebase", "true"]);
+    let file = "中 文 [x] & '$.bin";
+    commit(&f.a, file, "temporary tracked file\n");
+    g(&f.a, &["rm", "--", file]);
+    g(&f.a, &["commit", "-m", "delete intermediate file"]);
+    // Use a global exclusion file configured only in this temporary repository.
+    let exclusions = f.root.join("ignored-patterns");
+    fs::write(&exclusions, "*.bin\n").unwrap();
+    g(
+        &f.a,
+        &["config", "core.excludesFile", exclusions.to_str().unwrap()],
+    );
+    fs::write(f.a.join(file), "precious recreated file\n").unwrap();
+    let local = g(&f.a, &["rev-parse", "HEAD"]);
+    let remote = commit(&f.b, "remote.txt", "remote work\n");
+    g(&f.b, &["push"]);
+    let error = f.service.sync(f.a.to_str().unwrap()).unwrap_err();
+    assert_eq!(error.kind, "changed");
+    assert!(error.message.contains(file));
+    assert_eq!(g(&f.a, &["rev-parse", "HEAD"]), local);
+    assert_eq!(g(&f.remote, &["rev-parse", "main"]), remote);
+    assert_eq!(
+        fs::read_to_string(f.a.join(file)).unwrap(),
+        "precious recreated file\n"
+    );
+}
+
+#[test]
+fn rebase_ignored_file_and_directory_collisions_are_preserved() {
+    for directory in [true, false] {
+        let f = Fixture::new();
+        sync_identity(&f.a);
+        g(&f.a, &["config", "pull.rebase", "true"]);
+        let local = commit(&f.a, "local.txt", "local work\n");
+        fs::write(f.a.join(".git/info/exclude"), "artifact\n").unwrap();
+        let saved;
+        let remote;
+        if directory {
+            fs::create_dir(f.a.join("artifact")).unwrap();
+            saved = f.a.join("artifact/precious.bin");
+            remote = commit(&f.b, "artifact", "remote file\n");
+        } else {
+            saved = f.a.join("artifact");
+            fs::create_dir(f.b.join("artifact")).unwrap();
+            remote = commit(&f.b, "artifact/remote.txt", "remote directory\n");
+        }
+        fs::write(&saved, "precious ignored content\n").unwrap();
+        g(&f.b, &["push"]);
+        let error = f.service.sync(f.a.to_str().unwrap()).unwrap_err();
+        assert_eq!(error.kind, "changed");
+        assert_eq!(
+            fs::read_to_string(saved).unwrap(),
+            "precious ignored content\n"
+        );
+        assert_eq!(g(&f.a, &["rev-parse", "HEAD"]), local);
+        assert_eq!(g(&f.remote, &["rev-parse", "main"]), remote);
+    }
+}
+
+#[test]
+fn rebase_ignored_check_allows_clean_tracked_directory_to_file_replacement() {
+    let f = Fixture::new();
+    sync_identity(&f.a);
+    g(&f.a, &["config", "pull.rebase", "true"]);
+    fs::create_dir(f.b.join("replace")).unwrap();
+    commit(&f.b, "replace/tracked.txt", "tracked contents\n");
+    g(&f.b, &["push"]);
+    g(&f.a, &["pull", "--ff-only"]);
+    commit(&f.a, "local.txt", "local work\n");
+    g(&f.b, &["rm", "-r", "replace"]);
+    commit(&f.b, "replace", "replacement file\n");
+    g(&f.b, &["push"]);
+    assert_eq!(f.sync(&f.a).kind, StatusKind::Synced);
+    assert_eq!(
+        fs::read_to_string(f.a.join("replace")).unwrap(),
+        "replacement file\n"
+    );
+}
+
+#[test]
+fn rebase_merges_preserves_local_merge_topology() {
+    let f = Fixture::new();
+    sync_identity(&f.a);
+    g(&f.a, &["config", "pull.rebase", "merges"]);
+    g(&f.a, &["switch", "-c", "side"]);
+    commit(&f.a, "side.txt", "side\n");
+    g(&f.a, &["switch", "main"]);
+    commit(&f.a, "local.txt", "local\n");
+    g(&f.a, &["merge", "--no-ff", "--no-edit", "side"]);
+    let remote = commit(&f.b, "remote.txt", "remote\n");
+    g(&f.b, &["push"]);
+    let result = f.sync(&f.a);
+    assert_eq!(result.kind, StatusKind::Synced);
+    assert_eq!(
+        g(
+            &f.a,
+            &[
+                "rev-list",
+                "--merges",
+                "--count",
+                &format!("{remote}..HEAD")
+            ]
+        ),
+        "1"
+    );
+    for file in ["side.txt", "local.txt", "remote.txt"] {
+        assert!(f.a.join(file).exists());
+    }
+}
+
+#[test]
+fn rebase_does_not_replay_withdrawn_upstream_commits_after_remote_rewrite() {
+    let f = Fixture::new();
+    sync_identity(&f.a);
+    g(&f.a, &["config", "pull.rebase", "true"]);
+    let base = g(&f.b, &["rev-parse", "HEAD"]);
+    commit(&f.b, "withdrawn.txt", "withdrawn upstream commit\n");
+    g(&f.b, &["push"]);
+    g(&f.a, &["pull", "--ff-only"]);
+    commit(&f.a, "local.txt", "local work\n");
+    // Only this test's temporary bare remote is rewritten.
+    g(&f.b, &["reset", "--hard", &base]);
+    let new_upstream = commit(&f.b, "replacement.txt", "replacement upstream\n");
+    g(&f.b, &["push", "--force"]);
+    let result = f.sync(&f.a);
+    assert_eq!(result.kind, StatusKind::Synced);
+    assert_eq!(g(&f.a, &["rev-parse", "HEAD^"]), new_upstream);
+    assert!(!f.a.join("withdrawn.txt").exists());
+    assert!(f.a.join("local.txt").exists());
+}
 #[test]
 fn real_conflict_is_separate_and_writes_are_paused() {
     let f = Fixture::new();

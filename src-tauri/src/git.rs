@@ -56,7 +56,7 @@ fn classify(s: &str) -> &'static str {
         "git"
     }
 }
-fn read_capped(mut pipe: impl Read) -> (Vec<u8>, bool) {
+fn read_capped(mut pipe: impl Read, first_record: bool) -> (Vec<u8>, bool) {
     let mut all = Vec::new();
     let mut truncated = false;
     let mut buf = [0u8; 8192];
@@ -64,9 +64,16 @@ fn read_capped(mut pipe: impl Read) -> (Vec<u8>, bool) {
         if n == 0 {
             break;
         }
+        let end = first_record
+            .then(|| buf[..n].iter().position(|b| *b == 0))
+            .flatten();
+        let count = end.map_or(n, |i| i + 1);
         let room = (8 * 1024 * 1024usize).saturating_sub(all.len());
-        truncated |= n > room;
-        all.extend_from_slice(&buf[..n.min(room)]);
+        truncated |= count > room;
+        all.extend_from_slice(&buf[..count.min(room)]);
+        if end.is_some() || (first_record && truncated) {
+            break;
+        }
     }
     (all, truncated)
 }
@@ -110,6 +117,62 @@ fn spawn_error(path: &Path, error: std::io::Error) -> GitError {
     }
 }
 pub fn run_timeout(path: &Path, args: &[&str], timeout: Duration) -> Result<String> {
+    run_output(path, args, timeout, false)
+}
+
+// Internal read-only query: only the first ignored path is needed to refuse a
+// write. Never invoke ls-files without explicit, literal, scoped pathspecs.
+pub(crate) fn first_ignored_path(path: &Path, probes: &[String]) -> Result<Option<String>> {
+    if probes.is_empty() {
+        return Ok(None);
+    }
+    // Literal pathspecs are otherwise case-sensitive even on Windows. Match
+    // the filesystem / Git case mode so Config.json cannot overwrite an
+    // ignored config.json (including a differently cased parent component).
+    let ignore_case = cfg!(windows)
+        || run(
+            path,
+            &[
+                "config",
+                "--type=bool",
+                "--default",
+                "false",
+                "--get",
+                "core.ignoreCase",
+            ],
+        )?
+        .trim()
+            == "true";
+    let magic = if ignore_case {
+        ":(top,literal,icase)"
+    } else {
+        ":(top,literal)"
+    };
+    let specs: Vec<_> = probes.iter().map(|p| format!("{magic}{p}")).collect();
+    let mut args = vec![
+        "-c",
+        "core.fsmonitor=false",
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+        "--no-empty-directory",
+        "-z",
+        "--",
+    ];
+    args.extend(specs.iter().map(String::as_str));
+    let output = run_output(path, &args, Duration::from_secs(90), true)?;
+    if output.is_empty() {
+        return Ok(None);
+    }
+    output
+        .strip_suffix('\0')
+        .map(|p| Some(p.to_owned()))
+        .ok_or_else(|| GitError::new("git", "忽略路径记录不完整，同步已暂停"))
+}
+
+fn run_output(path: &Path, args: &[&str], timeout: Duration, first_record: bool) -> Result<String> {
     check_directory(path)?;
     let mut command = Command::new("git");
     command
@@ -160,10 +223,10 @@ pub fn run_timeout(path: &Path, args: &[&str], timeout: Duration) -> Result<Stri
     let (out_tx, out_rx) = mpsc::channel();
     let (err_tx, err_rx) = mpsc::channel();
     thread::spawn(move || {
-        let _ = out_tx.send(read_capped(out));
+        let _ = out_tx.send(read_capped(out, first_record));
     });
     thread::spawn(move || {
-        let _ = err_tx.send(read_capped(err));
+        let _ = err_tx.send(read_capped(err, false));
     });
     let start = Instant::now();
     let mut status = None;
@@ -180,6 +243,18 @@ pub fn run_timeout(path: &Path, args: &[&str], timeout: Duration) -> Result<Stri
         }
         if stderr.is_none() {
             stderr = err_rx.try_recv().ok();
+        }
+        if first_record {
+            if let Some((bytes, false)) = &stdout {
+                if bytes.last() == Some(&0) {
+                    // This mode is restricted to the read-only ls-files query.
+                    // Stop as soon as a blocker is found; do not drain millions
+                    // of paths or treat the resulting broken pipe as an error.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Ok(String::from_utf8_lossy(bytes).into_owned());
+                }
+            }
         }
         if status.is_some() && stdout.is_some() && stderr.is_some() {
             break;
@@ -384,7 +459,7 @@ pub fn inspect(repo: &Repo, last_fetched: Option<u64>) -> Result<RepoStatus> {
     } else if s.ahead > 0 && s.behind > 0 {
         (
             StatusKind::Diverged,
-            "本地与远程已分叉，需要合并；尚不代表文件冲突",
+            "本地与远程各有新增提交；同步将按 Git 配置整合，分叉不代表文件冲突",
         )
     } else if s.behind > 0 {
         (StatusKind::Behind, "有远程提交可快进拉取")
@@ -400,6 +475,13 @@ pub fn inspect(repo: &Repo, last_fetched: Option<u64>) -> Result<RepoStatus> {
     };
     s.kind = kind;
     s.message = msg.into();
+    if let Some(operation) = &s.operation {
+        s.message = if s.conflicts.is_empty() {
+            format!("{operation} 尚未完成，同步已暂停；请在外部 Git 工具完成或中止后再同步，不会自动推送")
+        } else {
+            format!("{operation} 发生冲突（{} 个文件），同步已暂停且未推送；请解决冲突后继续或中止 {operation}", s.conflicts.len())
+        };
+    }
     if s.changed > 0 && matches!(s.kind, StatusKind::Ahead | StatusKind::Behind) {
         s.message.push_str("；存在未提交改动，同步写操作将暂停");
     }

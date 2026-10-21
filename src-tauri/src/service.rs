@@ -1,4 +1,8 @@
-use crate::{git, model::*};
+use crate::{
+    git,
+    model::*,
+    sync_policy::{self, Rebase},
+};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -397,6 +401,15 @@ impl Service {
                 "当前 upstream 不是远程分支，请交给 AI 检查配置",
             ));
         }
+        let policy = sync_policy::read(path, &before.branch)?;
+        // Resolve the old upstream's fork point before fetch changes its reflog,
+        // as pull --rebase does. This avoids replaying withdrawn upstream commits.
+        let fork_point = git::run(
+            path,
+            &["merge-base", "--fork-point", "@{upstream}", &before.head],
+        )
+        .ok()
+        .map(|oid| oid.trim().to_owned());
         self.log(&repo.path, "info", format!("获取远程更新 · {remote}"));
         git::fetch_only(repo, Some(remote))?;
         {
@@ -411,11 +424,7 @@ impl Service {
                 "fetch 期间仓库被外部操作修改，已暂停同步",
             ));
         }
-        if s.kind == StatusKind::Diverged
-            || s.operation.is_some()
-            || !s.conflicts.is_empty()
-            || s.kind == StatusKind::Attention
-        {
+        if s.operation.is_some() || !s.conflicts.is_empty() || s.kind == StatusKind::Attention {
             self.log(&repo.path, "warning", &s.message);
             return Ok(s);
         }
@@ -428,35 +437,128 @@ impl Service {
         self.assert_unchanged(repo, &s)?;
         let upstream_oid = git::run(path, &["rev-parse", "--verify", "@{upstream}"])?;
         let upstream_oid = upstream_oid.trim();
-        if s.behind > 0 {
-            self.log(
-                &repo.path,
-                "info",
-                format!("快进拉取 · {} 个提交", s.behind),
-            );
-            // Pin the fetched commit. Never create a merge commit or run a rebase.
-            git::run(
-                path,
-                &[
+        let rebase_requested = matches!(
+            policy.rebase,
+            Rebase::Linear | Rebase::Merges | Rebase::Interactive
+        );
+        // Pull uses the old fork point only when it was removed by an upstream
+        // rewrite. Otherwise exclude the entire fetched upstream, including any
+        // local commits a colleague has already adopted. A pure remote rewind
+        // can need rebase even though its ahead/behind count has behind == 0.
+        let replay_base = match fork_point.as_deref() {
+            Some(point)
+                if rebase_requested
+                    && git::run(path, &["merge-base", "--is-ancestor", point, upstream_oid])
+                        .is_err() =>
+            {
+                point
+            }
+            _ => upstream_oid,
+        };
+        let rewritten = replay_base != upstream_oid && policy.ff.as_deref() != Some("--ff-only");
+        if s.behind > 0 || rewritten {
+            let ff_only = policy.ff.as_deref() == Some("--ff-only")
+                || (policy.rebase == Rebase::Unset && policy.ff.is_none());
+            if ff_only && s.ahead > 0 {
+                s.message = if policy.ff.is_some() {
+                    "本地与远程已分叉；pull.ff=only 仅允许快进，同步已暂停"
+                } else {
+                    "本地与远程已分叉；尚未配置同步策略，请设置 pull.rebase 或 pull.ff 后重试"
+                }
+                .into();
+                self.log(&repo.path, "warning", &s.message);
+                return Ok(s);
+            }
+            if policy.rebase == Rebase::Interactive && !ff_only && s.ahead > 0 {
+                s.message =
+                    "配置要求 interactive rebase，请在终端完成交互式 rebase 后再同步".into();
+                s.kind = StatusKind::Attention;
+                self.log(&repo.path, "warning", &s.message);
+                return Ok(s);
+            }
+            let rebase =
+                matches!(policy.rebase, Rebase::Linear | Rebase::Merges) && !ff_only && s.ahead > 0;
+            // Pin the fetched commit; do not fetch again through pull, autostash,
+            // or rewrite other local branches through rebase.updateRefs.
+            let mut expected_merge_head = None;
+            let result = if rebase {
+                sync_policy::protect_ignored(path, upstream_oid, replay_base)?;
+                self.assert_unchanged(repo, &s)?;
+                self.log(&repo.path, "info", "按 Git 配置执行 rebase");
+                let mut args = vec![
+                    "-c",
+                    "core.editor=false",
+                    "-c",
+                    "sequence.editor=false",
+                    "rebase",
+                    "--no-autostash",
+                    "--no-update-refs",
+                    "--no-fork-point",
+                ];
+                // With pull.rebase=true, leave rebase.rebaseMerges in control.
+                // pull.rebase=merges explicitly overrides it, just as Git does.
+                if policy.rebase == Rebase::Merges {
+                    args.push("--rebase-merges");
+                }
+                args.extend(["--onto", upstream_oid, replay_base]);
+                git::run(path, &args)
+            } else {
+                self.log(&repo.path, "info", "按 Git 配置整合远端提交");
+                let ff = if ff_only
+                    || matches!(
+                        policy.rebase,
+                        Rebase::Linear | Rebase::Merges | Rebase::Interactive
+                    ) {
+                    Some("--ff-only")
+                } else {
+                    policy.ff.as_deref()
+                };
+                let mut args = vec![
                     "-c",
                     "merge.autoStash=false",
                     "merge",
-                    "--ff-only",
                     "--no-autostash",
                     "--no-squash",
                     "--no-edit",
                     "--no-overwrite-ignore",
-                    upstream_oid,
-                ],
-            )?;
+                ];
+                if let Some(ff) = ff {
+                    args.push(ff);
+                    if ff == "--ff-only" || (ff == "--ff" && s.ahead == 0) {
+                        expected_merge_head = Some(upstream_oid);
+                    }
+                }
+                args.push(upstream_oid);
+                git::run(path, &args)
+            };
+            if let Err(error) = result {
+                let paused = self.raw_status(repo)?;
+                if paused.operation.is_some() || !paused.conflicts.is_empty() {
+                    self.log(
+                        &repo.path,
+                        "warning",
+                        format!("{} · {}", paused.message, error.message),
+                    );
+                    return Ok(paused);
+                }
+                return Err(error);
+            }
             let after = self.raw_status(repo)?;
             if after.branch != s.branch
-                || after.head != upstream_oid
+                || expected_merge_head.is_some_and(|head| after.head != head)
                 || after.upstream != s.upstream
+                || after.behind > 0
+                || after.operation.is_some()
+                || !after.conflicts.is_empty()
+                || git::run(
+                    path,
+                    &["merge-base", "--is-ancestor", upstream_oid, &after.head],
+                )
+                .is_err()
             {
                 return Err(GitError::new(
                     "changed",
-                    "快进后检测到外部修改，请刷新后重试",
+                    "整合后检测到外部修改或整合尚未完成，同步已暂停；请刷新后检查",
                 ));
             }
             s = after;
@@ -503,6 +605,6 @@ impl Service {
             .map(|l| format!("- {}", l.message))
             .collect::<Vec<_>>()
             .join("\n");
-        Ok(git::redact(&format!("SourceNeo 诊断\n仓库：{}\n分支：{}\nHEAD：{}\nUpstream：{}\n状态：{:?}\n说明：{}\n待推送：{}，待拉取：{}，未提交改动：{}\n进行中操作：{}\n冲突文件：\n{}\n远程状态更新时间（Unix 秒）：{}\n最近错误：\n{}\n\n请先检查状态并解释处理方案；SourceNeo 不会自动合并、rebase 或丢弃修改。",s.path,s.branch,s.head,s.upstream.as_deref().unwrap_or("未配置"),s.kind,s.message,s.ahead,s.behind,s.changed,s.operation.as_deref().unwrap_or("无"),if s.conflicts.is_empty(){"无".into()}else{s.conflicts.iter().map(|p|format!("- {p}")).collect::<Vec<_>>().join("\n")},s.last_fetched.map(|v|v.to_string()).unwrap_or_else(||"从未获取".into()),if errors.is_empty(){"无"}else{&errors})))
+        Ok(git::redact(&format!("SourceNeo 诊断\n仓库：{}\n分支：{}\nHEAD：{}\nUpstream：{}\n状态：{:?}\n说明：{}\n待推送：{}，待拉取：{}，未提交改动：{}\n进行中操作：{}\n冲突文件：\n{}\n远程状态更新时间（Unix 秒）：{}\n最近错误：\n{}\n\n请先检查状态并解释处理方案；SourceNeo 同步遵循 Git 的 rebase / merge / 仅快进配置；冲突时暂停，不会自动解决冲突或丢弃修改。",s.path,s.branch,s.head,s.upstream.as_deref().unwrap_or("未配置"),s.kind,s.message,s.ahead,s.behind,s.changed,s.operation.as_deref().unwrap_or("无"),if s.conflicts.is_empty(){"无".into()}else{s.conflicts.iter().map(|p|format!("- {p}")).collect::<Vec<_>>().join("\n")},s.last_fetched.map(|v|v.to_string()).unwrap_or_else(||"从未获取".into()),if errors.is_empty(){"无"}else{&errors})))
     }
 }

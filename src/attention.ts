@@ -17,9 +17,11 @@ export function attention(status?: RepoStatus, failure?: string) {
   const reason = status.message;
   if (status.kind === "conflict" || status.conflicts.length)
     return {
-      label: `${status.conflicts.length} 项冲突`,
+      label: `${status.operation ? `${status.operation} · ` : ""}${status.conflicts.length} 项冲突`,
       reason,
-      action: "检查冲突文件，解决冲突并完成当前 Git 操作，再重新同步。",
+      action: status.operation
+        ? `同步已暂停且未推送。检查冲突文件，在外部 Git 工具解决后继续或中止 ${status.operation}，再重新同步。`
+        : "检查冲突文件，解决冲突并完成当前 Git 操作，再重新同步。",
     };
   if (status.operation)
     return {
@@ -70,7 +72,7 @@ export function attention(status?: RepoStatus, failure?: string) {
       label: "分支已分叉",
       reason,
       action:
-        "先由外部 AI / Git 工具处理两端提交的合并，再重新同步；分叉不代表已经存在文件冲突。",
+        "工作区干净时可点击同步，按分支 / pull.rebase 与 pull.ff 配置整合两端提交；若仅允许快进或未配置策略，请先检查 Git 配置。分叉不代表文件冲突。",
     };
   const dirty = status.changed > 0;
   if (status.kind === "ahead" || status.kind === "behind")
@@ -79,7 +81,7 @@ export function attention(status?: RepoStatus, failure?: string) {
       reason,
       action: dirty
         ? "先检查并提交本地改动，再同步当前分支。"
-        : "点击同步此仓库，获取远端状态并执行普通推送或快进拉取。",
+        : "点击同步此仓库，按 Git 配置整合远端提交，再执行普通推送。",
     };
   if (status.kind === "attention" && reason.includes("upstream 已失效"))
     return {
