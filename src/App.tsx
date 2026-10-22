@@ -1511,7 +1511,7 @@ export default function App() {
               aria-label="仓库完整路径"
               aria-invalid={Boolean(addError)}
               aria-describedby={addError ? "add-repo-error" : undefined}
-              placeholder="/Users/you/projects/repo 或 C:\\Projects\\repo"
+              placeholder="输入本地 Git 仓库目录"
               value={pathInput}
               onChange={(e) => {
                 setPathInput(e.target.value);
