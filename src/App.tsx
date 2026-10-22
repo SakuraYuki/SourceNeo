@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   ArrowDown,
@@ -33,7 +33,15 @@ import {
   type LogEntry,
   type Repo,
   type RepoStatus,
+  type RepoGroup,
+  type GroupEdit,
 } from "./types";
+import { RepoCheckbox, RepoGroupsDialog, MoveReposDialog } from "./RepoGroups";
+import {
+  BatchReport,
+  type BatchProgress,
+  type BatchResult,
+} from "./BatchReport";
 import { HistoryView } from "./HistoryView";
 import { Dialog } from "./Dialog";
 import { BranchDialog } from "./BranchDialog";
@@ -98,6 +106,15 @@ export default function App() {
     savePreference("panelWidth", String(panelWidth));
   }, [panelWidth]);
   const [repos, setRepos] = useState<Repo[]>([]);
+  const [groups, setGroups] = useState<RepoGroup[]>([]);
+  const [groupsOpen, setGroupsOpen] = useState(false);
+  const [movePaths, setMovePaths] = useState<string[] | null>(null);
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [batch, setBatch] = useState<BatchProgress | null>(null);
+  const batchGuard = useRef(false);
+  const groupGuard = useRef(false);
+  const groupRevision = useRef(0);
   const [statuses, setStatuses] = useState<Record<string, RepoStatus>>({});
   const [failures, setFailures] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState("");
@@ -165,7 +182,11 @@ export default function App() {
   }, []);
   const maximumPanelHeight = Math.max(
     106,
-    viewportHeight - 380 - (notice ? 60 : 0) - (!desktop ? 30 : 0),
+    viewportHeight -
+      380 -
+      (notice ? 60 : 0) -
+      (batch ? viewportHeight * 0.23 + 8 : 0) -
+      (!desktop ? 30 : 0),
   );
   const repoRef = useRef(repos);
   repoRef.current = repos;
@@ -179,11 +200,17 @@ export default function App() {
   const repoListRequest = useRef(0);
   const reloadRepos = useCallback(async () => {
     const id = ++repoListRequest.current;
+    const revision = groupRevision.current;
     try {
-      const list = await api.list();
+      const [list, savedGroups] = await Promise.all([api.list(), api.groups()]);
       if (!mounted.current || id !== repoListRequest.current) return null;
       repoRef.current = list;
       setRepos(list);
+      if (revision === groupRevision.current) setGroups(savedGroups);
+      setChecked(
+        (old) =>
+          new Set(list.filter((r) => old.has(r.path)).map((r) => r.path)),
+      );
       setSelected((current) =>
         list.some((r) => r.path === current) ? current : (list[0]?.path ?? ""),
       );
@@ -193,6 +220,26 @@ export default function App() {
       return null;
     }
   }, []);
+  async function editGroups(edit: GroupEdit) {
+    if (groupGuard.current) throw new Error("分组正在保存，请稍后重试");
+    groupGuard.current = true;
+    groupRevision.current++;
+    try {
+      const next = await api.editGroups(edit);
+      if (mounted.current) setGroups(next);
+    } finally {
+      groupRevision.current++;
+      groupGuard.current = false;
+    }
+  }
+  function toggleChecked(paths: string[]) {
+    setChecked((old) => {
+      const next = new Set(old);
+      const all = paths.every((p) => old.has(p));
+      paths.forEach((p) => (all ? next.delete(p) : next.add(p)));
+      return next;
+    });
+  }
   const refreshLogs = useCallback(async () => {
     try {
       setLogs(await api.logs());
@@ -300,9 +347,15 @@ export default function App() {
     lastFingerprint.current = statusFingerprint;
   }, [selected, statusFingerprint, loadHistory]);
   const runSync = useCallback(
-    async (repo: Repo, fetchOnly = false, remote?: string) => {
-      if (busyRef.current.has(repo.path)) return;
-      busyRef.current.add(repo.path);
+    async (
+      repo: Repo,
+      fetchOnly = false,
+      remote?: string,
+      reserved = false,
+    ): Promise<BatchResult> => {
+      if (!reserved && busyRef.current.has(repo.path))
+        return { repo, outcome: "skipped", message: "仓库正在操作" };
+      if (!reserved) busyRef.current.add(repo.path);
       setBusy(new Set(busyRef.current));
       try {
         const s = fetchOnly
@@ -322,9 +375,20 @@ export default function App() {
           delete next[repo.path];
           return next;
         });
+        return {
+          repo,
+          outcome:
+            fetchOnly || s.kind === "synced"
+              ? "success"
+              : s.kind === "error"
+                ? "error"
+                : "attention",
+          message: s.message,
+        };
       } catch (e) {
         setNotice(`${repo.name}：${errorText(e)}`);
         await readStatus(repo);
+        return { repo, outcome: "error", message: errorText(e) };
       } finally {
         busyRef.current.delete(repo.path);
         setBusy(new Set(busyRef.current));
@@ -360,11 +424,43 @@ export default function App() {
         setNotice(errorText(e));
     }
   }
-  async function fetchAll() {
-    await pooled(repoRef.current, (r) => runSync(r, true));
-  }
-  async function syncAll() {
-    await pooled(repoRef.current, runSync);
+  async function runBatch(targets: Repo[], fetchOnly = false) {
+    if (batchGuard.current || !targets.length) return;
+    batchGuard.current = true;
+    const queued: Repo[] = [],
+      results: BatchResult[] = [];
+    for (const target of targets) {
+      if (busyRef.current.has(target.path))
+        results.push({
+          repo: target,
+          outcome: "skipped",
+          message: "仓库正在操作",
+        });
+      else {
+        busyRef.current.add(target.path);
+        queued.push(target);
+      }
+    }
+    setBusy(new Set(busyRef.current));
+    setBatch({
+      label: fetchOnly ? "批量 Fetch" : "批量同步",
+      total: targets.length,
+      running: true,
+      results,
+    });
+    try {
+      await pooled(queued, async (target) => {
+        const result = await runSync(target, fetchOnly, undefined, true);
+        if (mounted.current)
+          setBatch((old) =>
+            old ? { ...old, results: [...old.results, result] } : old,
+          );
+      });
+    } finally {
+      batchGuard.current = false;
+      if (mounted.current)
+        setBatch((old) => (old ? { ...old, running: false } : old));
+    }
   }
   async function changeBranch(
     target: Repo,
@@ -555,6 +651,11 @@ export default function App() {
         run: () => void openTool(target, "editor"),
       },
       {
+        label: "移动到分组…",
+        separator: true,
+        run: () => setMovePaths([target.path]),
+      },
+      {
         label: "复制仓库路径",
         separator: true,
         run: () => {
@@ -602,13 +703,37 @@ export default function App() {
       (!filter || isIssue(r)) &&
       `${r.name} ${r.path}`.toLowerCase().includes(query.toLowerCase()),
   );
+  const groupedPaths = new Set(groups.flatMap((g) => g.paths));
+  const sections = [
+    ...groups.map((g) => ({
+      key: g.name,
+      name: g.name,
+      repos: visible.filter((r) => g.paths.includes(r.path)),
+    })),
+    {
+      key: "",
+      name: "未分组",
+      repos: visible.filter((r) => !groupedPaths.has(r.path)),
+    },
+  ].filter((g) => g.repos.length || (groups.length > 0 && !query && !filter));
+  const expanded = sections.flatMap((g) =>
+    groups.length > 0 && collapsed.has(g.key) ? [] : g.repos,
+  );
+  const checkedRepos = repos.filter((r) => checked.has(r.path));
+  const hiddenCheckedCount = checkedRepos.filter(
+    (r) => !expanded.some((v) => v.path === r.path),
+  ).length;
   const selectedLogs = logs.filter((l) => !selected || l.path === selected);
   const effectivePanelHeight = Math.max(
     106,
     Math.min(
       panelHeight,
       maximumPanelHeight,
-      repos.length ? 76 + Math.max(visible.length, 1) * REPO_ROW_HEIGHT : 180,
+      repos.length
+        ? 114 +
+            (groups.length ? sections.length * 30 : 0) +
+            Math.max(expanded.length, 1) * REPO_ROW_HEIGHT
+        : 180,
     ),
   );
   function drag(e: React.PointerEvent) {
@@ -691,8 +816,8 @@ export default function App() {
           </button>
           <button
             className="primary"
-            disabled={!repos.length || busy.size > 0}
-            onClick={() => void syncAll()}
+            disabled={!repos.length || busy.size > 0 || batch?.running}
+            onClick={() => void runBatch(repoRef.current)}
           >
             {busy.size ? (
               <LoaderCircle className="spin" size={15} />
@@ -702,8 +827,8 @@ export default function App() {
             同步全部{repos.length > 0 && <kbd>{repos.length}</kbd>}
           </button>
           <button
-            disabled={!repos.length || busy.size > 0}
-            onClick={() => void fetchAll()}
+            disabled={!repos.length || busy.size > 0 || batch?.running}
+            onClick={() => void runBatch(repoRef.current, true)}
             title="仅获取远程对象和远程跟踪引用"
           >
             Fetch 全部
@@ -756,6 +881,7 @@ export default function App() {
           </button>
         </div>
       )}
+      {batch && <BatchReport batch={batch} onClose={() => setBatch(null)} />}
       <div
         className={`workspace ${isSide ? "side" : "stacked"} ${isSide && effectivePanelWidth < 300 ? "compact-sidebar" : ""}`}
         style={
@@ -791,6 +917,14 @@ export default function App() {
             </label>
             <div className="toolbar-actions">
               <button
+                className="icon-btn"
+                aria-label="管理仓库分组"
+                title="管理仓库分组"
+                onClick={() => setGroupsOpen(true)}
+              >
+                <FolderGit2 size={14} />
+              </button>
+              <button
                 className={`icon-btn ${filter ? "active" : ""}`}
                 aria-label="仅显示需关注仓库"
                 aria-pressed={filter}
@@ -821,6 +955,51 @@ export default function App() {
                 <ChevronDown size={12} />
               </button>
             </div>
+          </div>
+          <div className="batch-toolbar" aria-label="仓库多选操作">
+            <RepoCheckbox
+              paths={expanded.map((r) => r.path)}
+              checked={checked}
+              onToggle={toggleChecked}
+              label="全选当前可见仓库"
+            />
+            <span className="selection-count">
+              {checkedRepos.length
+                ? `已选 ${checkedRepos.length} 个`
+                : "多选仓库"}
+            </span>
+            {hiddenCheckedCount > 0 && (
+              <span className="selection-count">
+                （含 {hiddenCheckedCount} 个隐藏项）
+              </span>
+            )}
+            {checkedRepos.length > 0 && (
+              <>
+                <button
+                  className="text-btn"
+                  onClick={() => setChecked(new Set())}
+                >
+                  清空选择
+                </button>
+                <button
+                  disabled={batch?.running}
+                  onClick={() => void runBatch(checkedRepos)}
+                >
+                  同步所选
+                </button>
+                <button
+                  disabled={batch?.running}
+                  onClick={() => void runBatch(checkedRepos, true)}
+                >
+                  Fetch 所选
+                </button>
+                <button
+                  onClick={() => setMovePaths(checkedRepos.map((r) => r.path))}
+                >
+                  移动分组
+                </button>
+              </>
+            )}
           </div>
           <div className="repo-table">
             <div className="repo-columns">
@@ -860,143 +1039,192 @@ export default function App() {
                 </button>
               </div>
             ) : (
-              visible.map((r) => {
-                const s = statuses[r.path],
-                  failed = failures[r.path],
-                  loading = busy.has(r.path),
-                  kind = failed ? "error" : s?.kind;
-                const info = attention(s, failed);
-                return (
-                  <div
-                    key={r.path}
-                    className={`repo-row ${r.path === selected ? "selected" : ""} ${loading ? "operating" : ""} ${isIssue(r) ? "has-issue" : ""}`}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      const origin =
-                        e.currentTarget.querySelector<HTMLButtonElement>(
-                          ".repo-select",
-                        )!;
-                      openRepoMenu(r, origin, e.clientX, e.clientY);
-                    }}
-                    onKeyDown={(e) => {
-                      if (
-                        e.key === "ContextMenu" ||
-                        (e.shiftKey && e.key === "F10")
-                      ) {
-                        e.preventDefault();
-                        openRepoMenu(r, e.target as HTMLElement);
-                      }
-                    }}
-                  >
-                    <button
-                      className="repo-select"
-                      onClick={() => setSelected(r.path)}
-                      aria-label={`查看仓库 ${r.name}，分支 ${s?.branch ?? "读取中"}，${info.label}，${s?.changed ?? 0} 个未提交改动，待推送 ${s?.ahead ?? 0}，待拉取 ${s?.behind ?? 0}`}
-                      aria-pressed={r.path === selected}
-                      title={`${r.path}\n分支：${s?.branch ?? "读取中"}\n${failed || s?.message || "正在读取状态"}\n远程更新：${s?.lastFetched ? new Date(s.lastFetched * 1000).toLocaleString("zh-CN") : "尚未获取"}`}
-                    >
-                      <span className="repo-name" title={r.path}>
-                        <FolderGit2 size={17} />
-                        <strong>{r.name}</strong>
-                        {repos.some(
-                          (other) =>
-                            other.path !== r.path &&
-                            other.commonDir === r.commonDir,
-                        ) && (
-                          <span
-                            className="worktree-tag"
-                            title="共享 Git 元数据的 worktree"
-                          >
-                            WT
-                          </span>
-                        )}
-                      </span>
-                      <span
-                        className={`branch ${s?.changed ? "has-changes" : ""}`}
+              sections.map((section) => (
+                <Fragment key={section.key}>
+                  {groups.length > 0 && (
+                    <div className="repo-group-heading">
+                      <RepoCheckbox
+                        paths={section.repos.map((r) => r.path)}
+                        checked={checked}
+                        onToggle={toggleChecked}
+                        label={`选择分组 ${section.name} 中的仓库`}
+                      />
+                      <button
+                        className="text-btn"
+                        aria-expanded={!collapsed.has(section.key)}
+                        aria-label={`${collapsed.has(section.key) ? "展开" : "折叠"}分组 ${section.name}，${section.repos.length} 个仓库`}
+                        title={section.name}
+                        onClick={() =>
+                          setCollapsed((old) => {
+                            const next = new Set(old);
+                            if (next.has(section.key)) next.delete(section.key);
+                            else next.add(section.key);
+                            return next;
+                          })
+                        }
                       >
-                        <GitBranch size={13} />
-                        <span className="ellipsis">
-                          {s?.branch === "(detached)"
-                            ? "游离 HEAD"
-                            : (s?.branch ?? "读取中…")}
-                        </span>
-                        {!!s?.changed && !info.label.endsWith("项未提交") && (
-                          <span className="changes" title="未提交改动数">
-                            {s.changed} M
-                          </span>
-                        )}
-                      </span>
-                      <span className="status-cell">
-                        {loading ? (
-                          <span className="badge working">
-                            <LoaderCircle size={12} className="spin" />
-                            操作中
-                          </span>
-                        ) : kind ? (
-                          <span className={`badge ${kind}`} title={info.reason}>
-                            <StatusIcon kind={kind} />
-                            {info.label}
-                          </span>
+                        {collapsed.has(section.key) ? (
+                          <ChevronRight size={13} />
                         ) : (
-                          <span className="muted">正在读取</span>
+                          <ChevronDown size={13} />
                         )}
-                        {!!s?.ahead && (
-                          <span className="delta">
-                            <ArrowUp size={11} />
-                            {s.ahead}
-                          </span>
-                        )}
-                        {!!s?.behind && (
-                          <span className="delta">
-                            <ArrowDown size={11} />
-                            {s.behind}
-                          </span>
-                        )}
-                      </span>
-                      <span
-                        className="remote-time"
-                        title={
-                          s?.lastFetched
-                            ? new Date(s.lastFetched * 1000).toLocaleString(
-                                "zh-CN",
-                              )
-                            : "SourceNeo 尚未成功获取远程状态；当前展示本地已有的远程引用"
-                        }
-                      >
-                        {time(s?.lastFetched)}
-                      </span>
-                    </button>
-                    <div className="repo-row-actions">
-                      <button
-                        className="icon-btn"
-                        title={`同步 ${r.name}`}
-                        aria-label={`同步 ${r.name}`}
-                        disabled={loading}
-                        onClick={() => void runSync(r)}
-                      >
-                        <RefreshCw
-                          size={13}
-                          className={loading ? "spin" : ""}
-                        />
-                      </button>
-                      <button
-                        className="icon-btn"
-                        title={`更多操作 ${r.name}`}
-                        aria-label={`更多操作 ${r.name}`}
-                        aria-haspopup="menu"
-                        aria-expanded={
-                          menu?.repo.path === r.path &&
-                          menu.origin.getAttribute("aria-label") ===
-                            `更多操作 ${r.name}`
-                        }
-                        onClick={(e) => openRepoMenu(r, e.currentTarget)}
-                      >
-                        <MoreHorizontal size={13} />
+                        <strong>{section.name}</strong>
+                        <span className="count">{section.repos.length}</span>
                       </button>
                     </div>
-                  </div>
-                );
-              })
+                  )}
+                  {(!groups.length || !collapsed.has(section.key)
+                    ? section.repos
+                    : []
+                  ).map((r) => {
+                    const s = statuses[r.path],
+                      failed = failures[r.path],
+                      loading = busy.has(r.path),
+                      kind = failed ? "error" : s?.kind;
+                    const info = attention(s, failed);
+                    return (
+                      <div
+                        key={r.path}
+                        className={`repo-row ${r.path === selected ? "selected" : ""} ${checked.has(r.path) ? "checked" : ""} ${loading ? "operating" : ""} ${isIssue(r) ? "has-issue" : ""}`}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          const origin =
+                            e.currentTarget.querySelector<HTMLButtonElement>(
+                              ".repo-select",
+                            )!;
+                          openRepoMenu(r, origin, e.clientX, e.clientY);
+                        }}
+                        onKeyDown={(e) => {
+                          if (
+                            e.key === "ContextMenu" ||
+                            (e.shiftKey && e.key === "F10")
+                          ) {
+                            e.preventDefault();
+                            openRepoMenu(r, e.target as HTMLElement);
+                          }
+                        }}
+                      >
+                        <RepoCheckbox
+                          paths={[r.path]}
+                          checked={checked}
+                          onToggle={toggleChecked}
+                          label={`选择仓库 ${r.name}`}
+                        />
+                        <button
+                          className="repo-select"
+                          onClick={() => setSelected(r.path)}
+                          aria-label={`查看仓库 ${r.name}，分支 ${s?.branch ?? "读取中"}，${info.label}，${s?.changed ?? 0} 个未提交改动，待推送 ${s?.ahead ?? 0}，待拉取 ${s?.behind ?? 0}`}
+                          aria-pressed={r.path === selected}
+                          title={`${r.path}\n分支：${s?.branch ?? "读取中"}\n${failed || s?.message || "正在读取状态"}\n远程更新：${s?.lastFetched ? new Date(s.lastFetched * 1000).toLocaleString("zh-CN") : "尚未获取"}`}
+                        >
+                          <span className="repo-name" title={r.path}>
+                            <FolderGit2 size={17} />
+                            <strong>{r.name}</strong>
+                            {repos.some(
+                              (other) =>
+                                other.path !== r.path &&
+                                other.commonDir === r.commonDir,
+                            ) && (
+                              <span
+                                className="worktree-tag"
+                                title="共享 Git 元数据的 worktree"
+                              >
+                                WT
+                              </span>
+                            )}
+                          </span>
+                          <span
+                            className={`branch ${s?.changed ? "has-changes" : ""}`}
+                          >
+                            <GitBranch size={13} />
+                            <span className="ellipsis">
+                              {s?.branch === "(detached)"
+                                ? "游离 HEAD"
+                                : (s?.branch ?? "读取中…")}
+                            </span>
+                            {!!s?.changed &&
+                              !info.label.endsWith("项未提交") && (
+                                <span className="changes" title="未提交改动数">
+                                  {s.changed} M
+                                </span>
+                              )}
+                          </span>
+                          <span className="status-cell">
+                            {loading ? (
+                              <span className="badge working">
+                                <LoaderCircle size={12} className="spin" />
+                                操作中
+                              </span>
+                            ) : kind ? (
+                              <span
+                                className={`badge ${kind}`}
+                                title={info.reason}
+                              >
+                                <StatusIcon kind={kind} />
+                                {info.label}
+                              </span>
+                            ) : (
+                              <span className="muted">正在读取</span>
+                            )}
+                            {!!s?.ahead && (
+                              <span className="delta">
+                                <ArrowUp size={11} />
+                                {s.ahead}
+                              </span>
+                            )}
+                            {!!s?.behind && (
+                              <span className="delta">
+                                <ArrowDown size={11} />
+                                {s.behind}
+                              </span>
+                            )}
+                          </span>
+                          <span
+                            className="remote-time"
+                            title={
+                              s?.lastFetched
+                                ? new Date(s.lastFetched * 1000).toLocaleString(
+                                    "zh-CN",
+                                  )
+                                : "SourceNeo 尚未成功获取远程状态；当前展示本地已有的远程引用"
+                            }
+                          >
+                            {time(s?.lastFetched)}
+                          </span>
+                        </button>
+                        <div className="repo-row-actions">
+                          <button
+                            className="icon-btn"
+                            title={`同步 ${r.name}`}
+                            aria-label={`同步 ${r.name}`}
+                            disabled={loading}
+                            onClick={() => void runSync(r)}
+                          >
+                            <RefreshCw
+                              size={13}
+                              className={loading ? "spin" : ""}
+                            />
+                          </button>
+                          <button
+                            className="icon-btn"
+                            title={`更多操作 ${r.name}`}
+                            aria-label={`更多操作 ${r.name}`}
+                            aria-haspopup="menu"
+                            aria-expanded={
+                              menu?.repo.path === r.path &&
+                              menu.origin.getAttribute("aria-label") ===
+                                `更多操作 ${r.name}`
+                            }
+                            onClick={(e) => openRepoMenu(r, e.currentTarget)}
+                          >
+                            <MoreHorizontal size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </Fragment>
+              ))
             )}
           </div>
         </section>
@@ -1300,6 +1528,21 @@ export default function App() {
           onSwitch={(reference, create) =>
             changeBranch(branchRepo, reference, create)
           }
+        />
+      )}
+      {groupsOpen && (
+        <RepoGroupsDialog
+          groups={groups}
+          onEdit={editGroups}
+          onClose={() => setGroupsOpen(false)}
+        />
+      )}
+      {movePaths && (
+        <MoveReposDialog
+          paths={movePaths}
+          groups={groups}
+          onEdit={editGroups}
+          onClose={() => setMovePaths(null)}
         />
       )}
       {fetchChoice && (

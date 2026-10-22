@@ -23,6 +23,16 @@ mod desktop {
         blocking(move || Ok(s.list())).await
     }
     #[tauri::command]
+    pub async fn repo_groups(state: Backend<'_>) -> Result<Vec<RepoGroup>> {
+        let s = state.inner().clone();
+        blocking(move || Ok(s.groups())).await
+    }
+    #[tauri::command]
+    pub async fn edit_repo_groups(state: Backend<'_>, edit: GroupEdit) -> Result<Vec<RepoGroup>> {
+        let s = state.inner().clone();
+        blocking(move || s.edit_groups(edit)).await
+    }
+    #[tauri::command]
     pub async fn add_repo(state: Backend<'_>, path: String) -> Result<Repo> {
         let s = state.inner().clone();
         blocking(move || s.add(&path)).await
@@ -170,6 +180,8 @@ mod desktop {
             })
             .invoke_handler(tauri::generate_handler![
                 list_repos,
+                repo_groups,
+                edit_repo_groups,
                 add_repo,
                 remove_repo,
                 repo_status,

@@ -480,6 +480,127 @@ input::placeholder {
   width: 48px;
   flex-shrink: 0;
 }
+.repo-column-labels {
+  padding-left: 32px;
+}
+.repo-checkbox {
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  margin: 0 0 0 8px;
+  padding: 0;
+  align-self: center;
+  flex-shrink: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+.repo-row.checked {
+  background: var(--accent-bg);
+}
+.batch-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  min-height: 36px;
+  padding: 4px 6px 4px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--subtle);
+  flex-shrink: 0;
+}
+.batch-toolbar button {
+  font-size: 11px;
+  padding: 2px 6px;
+}
+.selection-count {
+  font-size: 11px;
+  color: var(--muted);
+}
+.repo-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--subtle);
+  border-bottom: 1px solid var(--border);
+  height: 30px;
+}
+.repo-group-heading button {
+  min-width: 0;
+  justify-content: flex-start;
+}
+.repo-group-heading strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.group-list {
+  max-height: 35vh;
+  overflow: auto;
+  margin-bottom: 14px;
+}
+.group-editor-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+.group-editor-row strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 6px;
+}
+.modal select {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+}
+.batch-report {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  background: var(--panel);
+  max-height: 23vh;
+  overflow: auto;
+  font-size: 12px;
+}
+.batch-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.batch-report progress {
+  display: block;
+  width: 100%;
+  height: 4px;
+  accent-color: var(--primary);
+  margin: 5px 0;
+}
+.batch-report summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.batch-report ul {
+  list-style: none;
+  padding: 0;
+  margin: 6px 0;
+}
+.batch-report li {
+  padding: 3px 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .repo-row {
   display: flex;
   min-width: 700px;

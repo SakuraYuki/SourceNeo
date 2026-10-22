@@ -9,6 +9,31 @@ pub struct Repo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RepoGroup {
+    pub name: String,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub enum GroupEdit {
+    Create {
+        name: String,
+    },
+    Rename {
+        group: String,
+        name: String,
+    },
+    Remove {
+        group: String,
+    },
+    Move {
+        paths: Vec<String>,
+        group: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum StatusKind {
     Synced,

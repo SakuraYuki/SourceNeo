@@ -3,6 +3,15 @@ export interface Repo {
   name: string;
   commonDir: string;
 }
+export interface RepoGroup {
+  name: string;
+  paths: string[];
+}
+export type GroupEdit =
+  | { action: "create"; name: string }
+  | { action: "rename"; group: string; name: string }
+  | { action: "remove"; group: string }
+  | { action: "move"; paths: string[]; group: string | null };
 export type Kind =
   | "synced"
   | "ahead"

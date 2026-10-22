@@ -16,6 +16,8 @@ use std::{
 struct Saved {
     repos: Vec<Repo>,
     #[serde(default)]
+    groups: Vec<RepoGroup>,
+    #[serde(default)]
     fetched: HashMap<String, u64>,
     #[serde(default)]
     tools: crate::tools::ToolSettings,
@@ -96,6 +98,82 @@ impl Service {
     pub fn list(&self) -> Vec<Repo> {
         self.saved.lock().unwrap().repos.clone()
     }
+    pub fn groups(&self) -> Vec<RepoGroup> {
+        self.saved.lock().unwrap().groups.clone()
+    }
+    pub fn edit_groups(&self, edit: GroupEdit) -> Result<Vec<RepoGroup>> {
+        let mut saved = self.saved.lock().unwrap();
+        let mut groups = saved.groups.clone();
+        let valid_name = |name: &str| -> Result<String> {
+            let name = name.trim();
+            if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+                return Err(GitError::new(
+                    "group",
+                    "分组名称须为 1–80 个字符，不能包含控制字符",
+                ));
+            }
+            Ok(name.to_owned())
+        };
+        match edit {
+            GroupEdit::Create { name } => {
+                let name = valid_name(&name)?;
+                if groups.iter().any(|g| g.name == name) {
+                    return Err(GitError::new("group", "分组名称已存在"));
+                }
+                groups.push(RepoGroup {
+                    name,
+                    paths: Vec::new(),
+                });
+            }
+            GroupEdit::Rename { group, name } => {
+                let name = valid_name(&name)?;
+                if groups.iter().any(|g| g.name == name && g.name != group) {
+                    return Err(GitError::new("group", "分组名称已存在"));
+                }
+                groups
+                    .iter_mut()
+                    .find(|g| g.name == group)
+                    .ok_or_else(|| GitError::new("group", "分组不存在"))?
+                    .name = name;
+            }
+            GroupEdit::Remove { group } => {
+                if !groups.iter().any(|g| g.name == group) {
+                    return Err(GitError::new("group", "分组不存在"));
+                }
+                groups.retain(|g| g.name != group);
+            }
+            GroupEdit::Move { paths, group } => {
+                if group
+                    .as_ref()
+                    .is_some_and(|name| !groups.iter().any(|g| &g.name == name))
+                {
+                    return Err(GitError::new("group", "分组不存在"));
+                }
+                if paths
+                    .iter()
+                    .any(|p| !saved.repos.iter().any(|r| &r.path == p))
+                {
+                    return Err(GitError::new("path", "部分仓库已从列表移除，请刷新后重试"));
+                }
+                for g in &mut groups {
+                    g.paths.retain(|p| !paths.contains(p));
+                    if Some(&g.name) == group.as_ref() {
+                        for path in &paths {
+                            if !g.paths.contains(path) {
+                                g.paths.push(path.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let old = std::mem::replace(&mut saved.groups, groups);
+        if let Err(e) = self.persist(&saved) {
+            saved.groups = old;
+            return Err(e);
+        }
+        Ok(saved.groups.clone())
+    }
     pub fn tool_settings(&self) -> crate::tools::ToolSettings {
         self.saved.lock().unwrap().tools.clone()
     }
@@ -135,10 +213,15 @@ impl Service {
     pub fn remove(&self, path: &str) -> Result<()> {
         let mut saved = self.saved.lock().unwrap();
         let old = saved.repos.clone();
+        let old_groups = saved.groups.clone();
         let fetched = saved.fetched.remove(path);
         saved.repos.retain(|r| r.path != path);
+        for group in &mut saved.groups {
+            group.paths.retain(|p| p != path);
+        }
         if let Err(e) = self.persist(&saved) {
             saved.repos = old;
+            saved.groups = old_groups;
             if let Some(t) = fetched {
                 saved.fetched.insert(path.into(), t);
             }

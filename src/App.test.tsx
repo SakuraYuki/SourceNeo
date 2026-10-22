@@ -11,11 +11,13 @@ import {
 } from "@testing-library/react";
 import App from "./App";
 import { installDomMocks, makeHistory, repo, status } from "./test/fixtures";
-import type { History } from "./types";
+import type { History, RepoStatus } from "./types";
 
 const api = vi.hoisted(() => ({
   theme: vi.fn(),
   list: vi.fn(),
+  groups: vi.fn(),
+  editGroups: vi.fn(),
   add: vi.fn(),
   remove: vi.fn(),
   status: vi.fn(),
@@ -55,6 +57,7 @@ beforeEach(() => {
   localStorage.setItem("sourceneo.theme", "light");
   api.theme.mockResolvedValue(undefined);
   api.list.mockResolvedValue([repo]);
+  api.groups.mockResolvedValue([]);
   api.status.mockResolvedValue(status);
   api.history.mockImplementation(async (_path: string, count: number) =>
     makeHistory(count),
@@ -73,6 +76,251 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+});
+
+describe("repository groups and bulk actions", () => {
+  const other = {
+    ...repo,
+    path: "/test/other",
+    name: "other",
+    commonDir: "/test/other/.git",
+  };
+  const third = {
+    ...repo,
+    path: "/test/third",
+    name: "third",
+    commonDir: "/test/third/.git",
+  };
+
+  it("keeps checked repositories separate from history and runs Fetch only for checked paths, including hidden ones", async () => {
+    api.list.mockResolvedValue([repo, other, third]);
+    api.fetch.mockImplementation(async (path: string) => ({ ...status, path }));
+    render(<App />);
+    await screen.findByText("100+");
+    api.history.mockClear();
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: `选择仓库 ${repo.name}` }),
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索仓库" }), {
+      target: { value: "other" },
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: "全选当前可见仓库" }));
+    expect(screen.getByText("已选 2 个")).toBeTruthy();
+    expect(api.history).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Fetch 所选" }));
+    await screen.findByText(/批量 Fetch完成 · 2\/2 · 2 成功/);
+    expect(api.fetch.mock.calls.map((c) => c[0]).sort()).toEqual(
+      [repo.path, other.path].sort(),
+    );
+    expect(api.sync).not.toHaveBeenCalled();
+    expect(screen.getByText("已选 2 个")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "清空选择" }));
+    expect(screen.queryByRole("button", { name: "Fetch 所选" })).toBeNull();
+  });
+
+  it("selects a filtered group and excludes collapsed rows from visible select-all", async () => {
+    api.list.mockResolvedValue([repo, other, third]);
+    api.groups.mockResolvedValue([
+      { name: "工作", paths: [repo.path, other.path] },
+    ]);
+    render(<App />);
+    await screen.findByText("100+");
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "选择分组 工作 中的仓库" }),
+    );
+    expect(screen.getByText("已选 2 个")).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: `选择仓库 ${repo.name}` }),
+    );
+    expect(
+      (
+        screen.getByRole("checkbox", {
+          name: "选择分组 工作 中的仓库",
+        }) as HTMLInputElement
+      ).indeterminate,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "清空选择" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /折叠分组 工作，2 个仓库/ }),
+    );
+    expect(
+      screen.queryByRole("checkbox", { name: `选择仓库 ${repo.name}` }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("checkbox", { name: "全选当前可见仓库" }));
+    expect(screen.getByText("已选 1 个")).toBeTruthy();
+    expect(
+      (
+        screen.getByRole("checkbox", {
+          name: "选择仓库 third",
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+  });
+
+  it("creates, renames and deletes groups and moves selected repositories with retry on save failure", async () => {
+    render(<App />);
+    await screen.findByText("100+");
+    fireEvent.click(screen.getByRole("button", { name: "管理仓库分组" }));
+    api.editGroups.mockResolvedValueOnce([{ name: "工作", paths: [] }]);
+    fireEvent.change(screen.getByLabelText("新分组名称"), {
+      target: { value: "工作" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建分组" }));
+    await screen.findByRole("button", { name: "重命名分组 工作" });
+    expect(api.editGroups).toHaveBeenLastCalledWith({
+      action: "create",
+      name: "工作",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "重命名分组 工作" }));
+    fireEvent.change(screen.getByLabelText("重命名“工作”"), {
+      target: { value: "项目" },
+    });
+    api.editGroups.mockResolvedValueOnce([{ name: "项目", paths: [] }]);
+    fireEvent.click(screen.getByRole("button", { name: "保存名称" }));
+    await screen.findByRole("button", { name: "重命名分组 项目" });
+    expect(api.editGroups).toHaveBeenLastCalledWith({
+      action: "rename",
+      group: "工作",
+      name: "项目",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: `选择仓库 ${repo.name}` }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "移动分组" }));
+    fireEvent.change(screen.getByLabelText("目标分组"), {
+      target: { value: "项目" },
+    });
+    api.editGroups.mockRejectedValueOnce(new Error("磁盘已满"));
+    fireEvent.click(screen.getByRole("button", { name: "移动仓库" }));
+    await screen.findByText("磁盘已满");
+    expect(screen.getByText("已选 1 个")).toBeTruthy();
+    api.editGroups.mockResolvedValueOnce([
+      { name: "项目", paths: [repo.path] },
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "移动仓库" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "移动仓库到分组" }),
+      ).toBeNull(),
+    );
+    expect(api.editGroups).toHaveBeenLastCalledWith({
+      action: "move",
+      paths: [repo.path],
+      group: "项目",
+    });
+    expect(
+      screen.getByRole("button", { name: /折叠分组 项目，1 个仓库/ }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "管理仓库分组" }));
+    api.editGroups.mockResolvedValueOnce([]);
+    fireEvent.click(screen.getByRole("button", { name: "删除分组 项目" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "删除分组 项目" }),
+      ).toBeNull(),
+    );
+    expect(api.editGroups).toHaveBeenLastCalledWith({
+      action: "remove",
+      group: "项目",
+    });
+    expect(
+      screen.getByRole("checkbox", { name: `选择仓库 ${repo.name}` }),
+    ).toBeTruthy();
+    expect(api.remove).not.toHaveBeenCalled();
+  });
+
+  it("bounds batch concurrency, reserves queued repositories and reports failures and paused syncs separately", async () => {
+    const fourth = {
+      ...third,
+      path: "/test/fourth",
+      name: "fourth",
+      commonDir: "/test/fourth/.git",
+    };
+    const targets = [repo, other, third, fourth];
+    api.list.mockResolvedValue(targets);
+    const pending = new Map<
+      string,
+      { resolve: (s: RepoStatus) => void; reject: (e: Error) => void }
+    >();
+    api.sync.mockImplementation(
+      (path: string) =>
+        new Promise((resolve, reject) =>
+          pending.set(path, { resolve, reject }),
+        ),
+    );
+    render(<App />);
+    await screen.findByText("100+");
+    fireEvent.click(screen.getByRole("checkbox", { name: "全选当前可见仓库" }));
+    fireEvent.click(screen.getByRole("button", { name: "同步所选" }));
+    expect(api.sync).toHaveBeenCalledTimes(3);
+    expect(
+      (screen.getByRole("button", { name: "同步 fourth" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Fetch 所选" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    await act(async () =>
+      pending.get(repo.path)!.reject(new Error("网络断开")),
+    );
+    await waitFor(() => expect(api.sync).toHaveBeenCalledTimes(4));
+    await act(async () => {
+      pending.get(other.path)!.resolve({
+        ...status,
+        path: other.path,
+        kind: "attention",
+        message: "存在未提交改动",
+      });
+      pending.get(third.path)!.resolve({ ...status, path: third.path });
+      pending.get(fourth.path)!.resolve({ ...status, path: fourth.path });
+    });
+    await screen.findByText(/批量同步完成 · 4\/4 · 2 成功 · 1 需处理 · 1 失败/);
+    expect(screen.getByText(/失败：网络断开/)).toBeTruthy();
+    expect(screen.getByText(/需处理：存在未提交改动/)).toBeTruthy();
+    expect(api.fetch).not.toHaveBeenCalled();
+  });
+
+  it("skips an already operating repository while completing the rest of the selection", async () => {
+    api.list.mockResolvedValue([repo, other]);
+    let finish!: (s: RepoStatus) => void;
+    api.sync.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    api.fetch.mockResolvedValue({ ...status, path: other.path });
+    render(<App />);
+    await screen.findByText("100+");
+    fireEvent.click(screen.getByRole("button", { name: `同步 ${repo.name}` }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "全选当前可见仓库" }));
+    fireEvent.click(screen.getByRole("button", { name: "Fetch 所选" }));
+    await screen.findByText(/批量 Fetch完成 · 2\/2 · 1 成功 · 1 跳过/);
+    expect(api.fetch).toHaveBeenCalledTimes(1);
+    expect(api.fetch).toHaveBeenCalledWith(other.path, undefined);
+    await act(async () => finish(status));
+  });
+
+  it("does not let a late move response close a newly opened move dialog", async () => {
+    let finish!: (groups: []) => void;
+    api.editGroups.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    render(<App />);
+    await screen.findByText("100+");
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: `选择仓库 ${repo.name}` }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "移动分组" }));
+    fireEvent.click(screen.getByRole("button", { name: "移动仓库" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    fireEvent.click(screen.getByRole("button", { name: "移动分组" }));
+    await act(async () => finish([]));
+    expect(screen.getByRole("dialog", { name: "移动仓库到分组" })).toBeTruthy();
+  });
 });
 
 describe("repository dialogs", () => {

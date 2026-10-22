@@ -10,12 +10,18 @@ import type {
   Branch,
   CommitChanges,
   ChangedFile,
+  RepoGroup,
+  GroupEdit,
 } from "./types";
 export const desktop = isTauri();
 export const api = {
   theme: (theme: "light" | "dark") =>
     desktop ? getCurrentWindow().setTheme(theme) : Promise.resolve(),
   list: () => (desktop ? invoke<Repo[]>("list_repos") : Promise.resolve([])),
+  groups: () =>
+    desktop ? invoke<RepoGroup[]>("repo_groups") : Promise.resolve([]),
+  editGroups: (edit: GroupEdit) =>
+    invoke<RepoGroup[]>("edit_repo_groups", { edit }),
   add: (path: string) => invoke<Repo>("add_repo", { path }),
   remove: (path: string) => invoke<void>("remove_repo", { path }),
   status: (path: string) => invoke<RepoStatus>("repo_status", { path }),
