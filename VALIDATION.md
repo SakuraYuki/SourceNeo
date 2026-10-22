@@ -1,5 +1,11 @@
 # 第一版验收记录
 
+## 2026-10-22 v0.1.2 Windows 安装包
+
+将前端、Tauri 和 Rust 版本号升至 `0.1.2`。前端 74 项测试、Rust 71 项测试、Prettier、Rustfmt、Clippy 及前端生产构建通过；`npm run desktop:build -- --bundles nsis` 完成 Rust Release 编译和 NSIS x64 打包。
+
+安装包为 `artifacts/SourceNeo_0.1.2_x64-setup.exe`，大小 2,287,563 字节，SHA-256 为 `0BC106976516E42E678BB12931BC912FAA50BB33C961D4FD720F3C301DECD14B`，同目录附 `.sha256` 文件。产物按 `.gitignore` 保留在本机。
+
 ## 2026-10-22 v0.1.1 Windows 安装包
 
 将前端、Tauri 和 Rust 版本号从 `0.1.0` 升至 `0.1.1`。`npm test` 的 70 项测试、`npm run format:check` 和 `git diff --check` 通过；`npm run desktop:build -- --bundles nsis` 完成前端生产构建、Rust Release 编译及 NSIS x64 打包。
