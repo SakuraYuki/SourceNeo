@@ -244,9 +244,10 @@ mod tests {
         .unwrap();
         assert!(output.status.success());
         let actual = String::from_utf8_lossy(&output.stdout);
+        let expected = std::fs::canonicalize(&root).unwrap();
         assert_eq!(
-            actual.trim_start_matches('\u{feff}'),
-            root.to_str().unwrap()
+            std::fs::canonicalize(actual.trim_start_matches('\u{feff}')).unwrap(),
+            expected
         );
         let settings = ToolSettings {
             terminal: spec.executable.to_str().unwrap().into(),
@@ -268,8 +269,11 @@ mod tests {
         .unwrap();
         assert!(custom_output.status.success());
         assert_eq!(
-            String::from_utf8_lossy(&custom_output.stdout).trim_start_matches('\u{feff}'),
-            root.to_str().unwrap()
+            std::fs::canonicalize(
+                String::from_utf8_lossy(&custom_output.stdout).trim_start_matches('\u{feff}')
+            )
+            .unwrap(),
+            expected
         );
     }
 
