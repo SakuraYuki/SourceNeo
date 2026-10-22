@@ -78,6 +78,72 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+it("defaults to current history and resets pagination when toggling all branches", async () => {
+  render(<App />);
+  await screen.findByText("100+");
+  const toggle = screen.getByRole("switch", { name: "显示全部分支" });
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  expect(api.history).toHaveBeenLastCalledWith(repo.path, 100, false);
+  fireEvent.click(
+    screen.getByRole("button", { name: "加载更早的 100 条提交" }),
+  );
+  await screen.findByText("200+");
+  fireEvent.click(toggle);
+  await screen.findByText("100+");
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  expect(api.history).toHaveBeenLastCalledWith(repo.path, 100, true);
+  fireEvent.click(
+    screen.getByRole("button", { name: "加载更早的 100 条提交" }),
+  );
+  await screen.findByText("200+");
+  expect(api.history).toHaveBeenLastCalledWith(repo.path, 200, true);
+  fireEvent.click(toggle);
+  await screen.findByText("100+");
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  expect(api.history).toHaveBeenLastCalledWith(repo.path, 100, false);
+});
+
+it.each(["resolve", "reject"])(
+  "ignores a late all-branches %s after returning to current history",
+  async (result) => {
+    render(<App />);
+    await screen.findByText("100+");
+    const pending = deferred<History>();
+    api.history.mockReturnValueOnce(pending.promise);
+    const toggle = screen.getByRole("switch", { name: "显示全部分支" });
+    fireEvent.click(toggle);
+    await screen.findByText("正在读取提交历史…");
+    fireEvent.click(toggle);
+    await screen.findByText("100+");
+    await act(async () => {
+      if (result === "resolve") pending.resolve(makeHistory(2));
+      else pending.reject({ message: "旧范围的读取错误" });
+    });
+    expect(screen.getByText("100+")).toBeTruthy();
+    expect(screen.queryByText("旧范围的读取错误")).toBeNull();
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+  },
+);
+
+it("uses the latest scope for retry and a sync started before toggling", async () => {
+  const pending = deferred<RepoStatus>();
+  api.sync.mockReturnValueOnce(pending.promise);
+  render(<App />);
+  await screen.findByText("100+");
+  fireEvent.click(screen.getByRole("button", { name: "同步此仓库" }));
+  api.history.mockRejectedValueOnce({ message: "新范围读取失败" });
+  fireEvent.click(screen.getByRole("switch", { name: "显示全部分支" }));
+  await screen.findByText("新范围读取失败");
+  fireEvent.click(screen.getByRole("button", { name: "重试加载" }));
+  await screen.findByText("100+");
+  expect(api.history).toHaveBeenLastCalledWith(repo.path, 100, true);
+  api.history.mockClear();
+  await act(async () => pending.resolve(status));
+  await waitFor(() =>
+    expect(api.history).toHaveBeenLastCalledWith(repo.path, 100, true),
+  );
+});
+
 describe("repository groups and bulk actions", () => {
   const other = {
     ...repo,
@@ -333,7 +399,7 @@ describe("repository dialogs", () => {
     api.history.mockClear();
     menuAction("Fetch 此仓库", linked.name);
     await waitFor(() =>
-      expect(api.history).toHaveBeenCalledWith(repo.path, 100),
+      expect(api.history).toHaveBeenCalledWith(repo.path, 100, false),
     );
   });
   it("ignores a late remote selector after switching repositories", async () => {
@@ -377,7 +443,7 @@ describe("repository dialogs", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "复制仓库路径" }));
     expect(api.copy).toHaveBeenCalledWith(other.path);
     expect(screen.queryByRole("menu")).toBeNull();
-    expect(api.history).toHaveBeenLastCalledWith(repo.path, 100);
+    expect(api.history).toHaveBeenLastCalledWith(repo.path, 100, false);
     fireEvent.keyDown(row, { key: "F10", shiftKey: true });
     fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     expect(document.activeElement).toBe(row);
@@ -387,7 +453,7 @@ describe("repository dialogs", () => {
     await waitFor(() =>
       expect(api.fetch).toHaveBeenCalledWith(other.path, "backup"),
     );
-    expect(api.history).toHaveBeenLastCalledWith(repo.path, 100);
+    expect(api.history).toHaveBeenLastCalledWith(repo.path, 100, false);
   });
   it("uses the details menu and disables Git actions for an operating repository", async () => {
     api.fetch.mockReturnValue(new Promise(() => {}));
@@ -503,7 +569,7 @@ describe("repository dialogs", () => {
       ).disabled,
     ).toBe(true);
     await waitFor(() => expect(screen.queryByText("100+")).toBeNull());
-    expect(api.history).toHaveBeenLastCalledWith(repo.path, 100);
+    expect(api.history).toHaveBeenLastCalledWith(repo.path, 100, false);
   });
   it("opens the attention summary and locates the repository even when search hides it", async () => {
     api.status.mockResolvedValue({ ...status, kind: "attention", changed: 18 });
@@ -566,7 +632,7 @@ describe("repository dialogs", () => {
     expect(
       screen.getByRole("button", { name: "切换分支" }).textContent,
     ).toContain("feature");
-    expect(api.history).toHaveBeenLastCalledWith(repo.path, 100);
+    expect(api.history).toHaveBeenLastCalledWith(repo.path, 100, false);
   });
   it("shows add failures inside the open dialog and permits correcting the path", async () => {
     api.add.mockRejectedValueOnce({ message: "找不到 Git 仓库" });
@@ -633,7 +699,7 @@ it.each(["success", "failure"])(
       screen.getByRole("button", { name: "加载更早的 100 条提交" }),
     );
     await waitFor(() =>
-      expect(api.history).toHaveBeenLastCalledWith(repo.path, 200),
+      expect(api.history).toHaveBeenLastCalledWith(repo.path, 200, false),
     );
     await screen.findByText("200+");
   },
@@ -753,7 +819,7 @@ it.each(["success", "failure"])(
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
     fireEvent.click(screen.getByRole("button", { name: /查看仓库 Repo C/ }));
     await waitFor(() =>
-      expect(api.history).toHaveBeenLastCalledWith(c.path, 100),
+      expect(api.history).toHaveBeenLastCalledWith(c.path, 100, false),
     );
     removeFromMenu("Repo B");
     dialog = document.querySelector("dialog")!;

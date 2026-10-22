@@ -994,7 +994,12 @@ fn missing_upstream_empty_and_detached_are_actionable() {
     g(&empty, &["init", "--initial-branch=main"]);
     let r = f.service.add(empty.to_str().unwrap()).unwrap();
     assert_eq!(f.status(&empty).kind, StatusKind::Attention);
-    assert!(f.service.history(&r.path, 100).unwrap().commits.is_empty());
+    assert!(f
+        .service
+        .history(&r.path, 100, false)
+        .unwrap()
+        .commits
+        .is_empty());
     g(&f.b, &["checkout", "--detach"]);
     assert_eq!(f.sync(&f.b).kind, StatusKind::Attention);
 }
@@ -1069,6 +1074,70 @@ fn existing_git_lock_is_not_deleted() {
     assert!(f.a.join(".git/index.lock").exists());
 }
 #[test]
+fn history_scope_excludes_unmerged_local_remote_and_tag_only_commits() {
+    let f = Fixture::new();
+    let path = f.a.to_str().unwrap();
+    let base = g(&f.a, &["rev-parse", "HEAD"]);
+    g(&f.a, &["checkout", "-b", "side"]);
+    let side = commit(&f.a, "side.txt", "unmerged local branch");
+    g(&f.a, &["checkout", "-b", "tag-only"]);
+    let tagged = commit(&f.a, "tag.txt", "tag-only history");
+    g(&f.a, &["tag", "archived", &tagged]);
+    g(&f.a, &["checkout", "main"]);
+    g(&f.a, &["branch", "-D", "tag-only"]);
+    let main = commit(&f.a, "main.txt", "current branch");
+    let remote = commit(&f.b, "remote.txt", "remote-only history");
+    g(&f.b, &["push"]);
+    g(&f.a, &["fetch"]);
+
+    let current = f.service.history(path, 2, false).unwrap();
+    assert_eq!(
+        current
+            .commits
+            .iter()
+            .map(|c| c.hash.as_str())
+            .collect::<Vec<_>>(),
+        vec![main.as_str(), base.as_str()]
+    );
+    assert!(!current.has_more);
+    let all = f.service.history(path, 100, true).unwrap();
+    for hash in [&main, &base, &side, &tagged, &remote] {
+        assert!(all.commits.iter().any(|c| &c.hash == hash));
+    }
+    assert!(f.service.history(path, 2, true).unwrap().has_more);
+}
+
+#[test]
+fn history_scope_handles_detached_and_unborn_head() {
+    let f = Fixture::new();
+    let path = f.a.to_str().unwrap();
+    let base = g(&f.a, &["rev-parse", "HEAD"]);
+    let main = commit(&f.a, "main.txt", "main tip");
+    g(&f.a, &["checkout", "--detach", &base]);
+    let detached = commit(&f.a, "detached.txt", "detached tip");
+    let current = f.service.history(path, 100, false).unwrap();
+    assert_eq!(current.commits.len(), 2);
+    assert_eq!(current.commits[0].hash, detached);
+    assert!(current.commits[0].refs.contains(&"HEAD".into()));
+    let all = f.service.history(path, 100, true).unwrap();
+    for hash in [&main, &detached] {
+        assert!(all.commits.iter().any(|c| &c.hash == hash));
+    }
+
+    g(&f.a, &["symbolic-ref", "HEAD", "refs/heads/unborn"]);
+    let current = f.service.history(path, 100, false).unwrap();
+    assert!(current.commits.is_empty());
+    assert!(!current.has_more);
+    assert!(f
+        .service
+        .history(path, 100, true)
+        .unwrap()
+        .commits
+        .iter()
+        .any(|c| c.hash == main));
+}
+
+#[test]
 fn merge_graph_has_real_parents_refs_and_pagination() {
     let f = Fixture::new();
     g(&f.a, &["checkout", "-b", "feature"]);
@@ -1091,7 +1160,10 @@ fn merge_graph_has_real_parents_refs_and_pagination() {
             "merge feature",
         ],
     );
-    let h = f.service.history(f.a.to_str().unwrap(), 100).unwrap();
+    let h = f
+        .service
+        .history(f.a.to_str().unwrap(), 100, false)
+        .unwrap();
     assert_eq!(h.commits[0].parents, vec![main, feature]);
     assert!(h.commits[0].refs.contains(&"refs/heads/main".into()));
     assert!(h.commits[0].refs.contains(&"HEAD".into()));
@@ -1099,7 +1171,7 @@ fn merge_graph_has_real_parents_refs_and_pagination() {
         .commits
         .iter()
         .any(|c| c.refs.contains(&"refs/remotes/origin/main".into())));
-    let page = f.service.history(f.a.to_str().unwrap(), 2).unwrap();
+    let page = f.service.history(f.a.to_str().unwrap(), 2, false).unwrap();
     assert_eq!(page.commits.len(), 2);
     assert!(page.has_more);
 }
@@ -1326,7 +1398,7 @@ fn nested_repo_losing_git_metadata_never_operates_on_parent() {
     let error = f.service.sync(&child.path).unwrap_err();
     assert_eq!(error.kind, "path");
     assert!(f.service.status(&child.path).is_err());
-    assert!(f.service.history(&child.path, 100).is_err());
+    assert!(f.service.history(&child.path, 100, false).is_err());
     assert!(f.service.diagnostic(&child.path).is_err());
     assert_eq!(g(&f.remote, &["rev-parse", "main"]), remote_head);
     assert_eq!(g(&f.a, &["rev-parse", "HEAD"]), parent_head);
@@ -1346,7 +1418,10 @@ fn utf8_spaces_and_multiline_subjects_parse_without_losing_topology() {
     commit(&f.a, "中文 file.txt", "中文提交主题");
     let s = f.status(&f.a);
     assert_eq!(s.changed, 0);
-    let h = f.service.history(f.a.to_str().unwrap(), 100).unwrap();
+    let h = f
+        .service
+        .history(f.a.to_str().unwrap(), 100, false)
+        .unwrap();
     assert_eq!(h.commits[0].subject, "中文提交主题");
     fs::write(f.a.join("中文 file.txt"), "dirty").unwrap();
     assert_eq!(f.status(&f.a).changed, 1);
@@ -1395,7 +1470,7 @@ fn shallow_history_exposes_a_clone_boundary() {
         &["clone", "--depth=1", &url, shallow.to_str().unwrap()],
     );
     let r = f.service.add(shallow.to_str().unwrap()).unwrap();
-    assert!(f.service.history(&r.path, 100).unwrap().shallow);
+    assert!(f.service.history(&r.path, 100, false).unwrap().shallow);
     assert!(f.status(&shallow).shallow);
 }
 
@@ -1443,7 +1518,7 @@ fn signature_display_does_not_corrupt_machine_history() {
         ],
     );
     let repo = f.service.add(path.to_str().unwrap()).unwrap();
-    let history = f.service.history(&repo.path, 100).unwrap();
+    let history = f.service.history(&repo.path, 100, false).unwrap();
     assert_eq!(history.commits.len(), 2);
     assert_eq!(history.commits[0].hash, tip);
     assert_eq!(history.commits[0].parents, vec![base.clone()]);
@@ -1531,7 +1606,7 @@ fn read_only_git_metadata_allows_status_history_and_diagnostic() {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
         let path = f.a.to_str().unwrap();
         let status = f.service.status(path);
-        let history = f.service.history(path, 100);
+        let history = f.service.history(path, 100, false);
         let diagnostic = f.service.diagnostic(path);
         let branches = f.service.branches(path);
         let working = f.service.working_changes(path);
@@ -1585,7 +1660,7 @@ fn machine_history_uses_utf8_despite_configured_log_encoding() {
     g(&f.a, &["tag", "encoding-tip"]);
     for encoding in ["GB18030", "GBK"] {
         g(&f.a, &["config", "i18n.logOutputEncoding", encoding]);
-        let history = f.service.history(f.a.to_str().unwrap(), 1).unwrap();
+        let history = f.service.history(f.a.to_str().unwrap(), 1, false).unwrap();
         assert_eq!(history.commits.len(), 1);
         assert!(history.has_more);
         let tip = &history.commits[0];
@@ -1748,7 +1823,7 @@ fn existing_space_suffixed_repository_wins_over_trimmed_sibling() {
     );
     assert_eq!(f.service.status(&added.path).unwrap().head, spaced_head);
     assert_eq!(
-        f.service.history(&added.path, 100).unwrap().commits[0].hash,
+        f.service.history(&added.path, 100, false).unwrap().commits[0].hash,
         spaced_head
     );
     let reloaded = Service::new(f.root.join("config/repos.json")).unwrap();
@@ -1786,7 +1861,7 @@ fn separate_git_directory_preserves_trailing_space_and_real_git_locks() {
     assert_eq!(added.common_dir, expected.to_string_lossy());
     assert_eq!(git::git_dir(&added).unwrap(), expected);
     assert_eq!(
-        f.service.history(&added.path, 100).unwrap().commits[0].hash,
+        f.service.history(&added.path, 100, false).unwrap().commits[0].hash,
         head
     );
     fs::write(metadata.join("index.lock"), "existing lock").unwrap();

@@ -48,9 +48,14 @@ mod desktop {
         blocking(move || s.status(&path)).await
     }
     #[tauri::command]
-    pub async fn repo_history(state: Backend<'_>, path: String, limit: usize) -> Result<History> {
+    pub async fn repo_history(
+        state: Backend<'_>,
+        path: String,
+        limit: usize,
+        all_branches: Option<bool>,
+    ) -> Result<History> {
         let s = state.inner().clone();
-        blocking(move || s.history(&path, limit)).await
+        blocking(move || s.history(&path, limit, all_branches.unwrap_or(false))).await
     }
     #[tauri::command]
     pub async fn sync_repo(state: Backend<'_>, path: String) -> Result<RepoStatus> {

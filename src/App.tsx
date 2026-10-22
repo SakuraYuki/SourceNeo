@@ -127,6 +127,9 @@ export default function App() {
   const [history, setHistory] = useState<History | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
+  const [allBranches, setAllBranches] = useState(false);
+  const allBranchesRef = useRef(allBranches);
+  allBranchesRef.current = allBranches;
   const [limit, setLimit] = useState(100);
   const [notice, setNotice] = useState("");
   const [adding, setAdding] = useState(false);
@@ -316,7 +319,7 @@ export default function App() {
     setHistoryLoading(true);
     setHistoryError("");
     try {
-      const result = await api.history(path, count);
+      const result = await api.history(path, count, allBranchesRef.current);
       if (id === request.current && selectedRef.current === path)
         setHistory(result);
     } catch (e) {
@@ -329,7 +332,7 @@ export default function App() {
     setLimit(100);
     setHistory(null);
     void loadHistory(selected, 100);
-  }, [selected, loadHistory]);
+  }, [selected, allBranches, loadHistory]);
   const statusFingerprint =
     selected && statuses[selected]
       ? `${statuses[selected].head}:${statuses[selected].branch}:${statuses[selected].ahead}:${statuses[selected].behind}`
@@ -1394,12 +1397,26 @@ export default function App() {
             </button>
             <div className="tab-spacer" />
             {tab === "history" && (
-              <span className="graph-legend">
-                <i />
-                本地分支
-                <i className="remote" />
-                远程分支 <span className="muted">拓扑排序</span>
-              </span>
+              <div className="history-options">
+                <button
+                  className="history-scope"
+                  role="switch"
+                  aria-checked={allBranches}
+                  aria-label="显示全部分支"
+                  disabled={!repo}
+                  title="关闭时仅显示当前 HEAD 的历史（含已合并提交）；开启后显示全部分支历史"
+                  onClick={() => setAllBranches((value) => !value)}
+                >
+                  <span>全部分支</span>
+                  <span className="switch-track" aria-hidden="true" />
+                </button>
+                <span className="graph-legend">
+                  <i />
+                  本地分支
+                  <i className="remote" />
+                  远程分支 <span className="muted">拓扑排序</span>
+                </span>
+              </div>
             )}
           </div>
           {tab === "history" ? (

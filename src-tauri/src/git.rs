@@ -487,10 +487,18 @@ pub fn inspect(repo: &Repo, last_fetched: Option<u64>) -> Result<RepoStatus> {
     }
     Ok(s)
 }
-pub fn history(repo: &Repo, limit: usize) -> Result<History> {
+pub fn history(repo: &Repo, limit: usize, all_branches: bool) -> Result<History> {
     let path = Path::new(&repo.path);
     let shallow = run(path, &["rev-parse", "--is-shallow-repository"])?.trim() == "true";
     let has_head = run(path, &["rev-parse", "--verify", "HEAD"]).is_ok();
+    // An unborn branch has no current history, even if other refs have commits.
+    if !has_head && !all_branches {
+        return Ok(History {
+            commits: Vec::new(),
+            has_more: false,
+            shallow,
+        });
+    }
     let mut args = vec![
         "log",
         "--encoding=UTF-8",
@@ -498,11 +506,13 @@ pub fn history(repo: &Repo, limit: usize) -> Result<History> {
         "--no-notes",
         "--no-decorate",
         "--no-patch",
-        "--all",
         "--topo-order",
         "-z",
         "--format=%H%x00%P%x00%s%x00%an%x00%aI",
     ];
+    if all_branches {
+        args.push("--all");
+    }
     if has_head {
         args.push("HEAD")
     };

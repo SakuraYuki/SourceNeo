@@ -1017,6 +1017,42 @@ select {
 .tab-spacer {
   flex: 1;
 }
+.history-options {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.history-scope {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 2px 4px;
+  gap: 7px;
+}
+.switch-track {
+  display: inline-flex;
+  align-items: center;
+  width: 26px;
+  height: 15px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--border-strong);
+}
+.switch-track::before {
+  content: "";
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--text);
+}
+.history-scope[aria-checked="true"] .switch-track {
+  background: var(--accent);
+}
+.history-scope[aria-checked="true"] .switch-track::before {
+  transform: translateX(11px);
+  background: var(--panel);
+}
 .graph-legend {
   font-size: 11px;
   display: flex;

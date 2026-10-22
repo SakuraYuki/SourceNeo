@@ -25,8 +25,8 @@ export const api = {
   add: (path: string) => invoke<Repo>("add_repo", { path }),
   remove: (path: string) => invoke<void>("remove_repo", { path }),
   status: (path: string) => invoke<RepoStatus>("repo_status", { path }),
-  history: (path: string, limit: number) =>
-    invoke<History>("repo_history", { path, limit }),
+  history: (path: string, limit: number, allBranches = false) =>
+    invoke<History>("repo_history", { path, limit, allBranches }),
   sync: (path: string) => invoke<RepoStatus>("sync_repo", { path }),
   fetch: (path: string, remote?: string) =>
     invoke<RepoStatus>("fetch_repo", { path, remote }),

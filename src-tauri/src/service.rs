@@ -314,9 +314,9 @@ impl Service {
             Ok(s)
         })
     }
-    pub fn history(&self, path: &str, limit: usize) -> Result<History> {
+    pub fn history(&self, path: &str, limit: usize, all_branches: bool) -> Result<History> {
         self.with_repo(path, Access::ReadOnly, |repo| {
-            git::history(repo, limit.clamp(1, 5000))
+            git::history(repo, limit.clamp(1, 5000), all_branches)
         })
     }
     pub fn branches(&self, path: &str) -> Result<Vec<Branch>> {
