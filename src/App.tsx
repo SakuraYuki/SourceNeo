@@ -1,3 +1,12 @@
+import { AcquireDialog } from "./AcquireDialog";
+import { SyncPreviewDialog } from "./SyncPreviewDialog";
+import { HistorySearchDialog } from "./HistorySearchDialog";
+import { CompareDialog } from "./CompareDialog";
+import { OperationLogs } from "./OperationLogs";
+import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
+import { useRepositoryHistory } from "./hooks/useRepositoryHistory";
+import { useBatchOperations } from "./hooks/useBatchOperations";
+import { useOperationProgress } from "./hooks/useOperationProgress";
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
@@ -29,7 +38,6 @@ import {
 import { api, desktop, pooled } from "./api";
 import {
   errorText,
-  type History,
   type LogEntry,
   type Repo,
   type RepoStatus,
@@ -37,11 +45,7 @@ import {
   type GroupEdit,
 } from "./types";
 import { RepoCheckbox, RepoGroupsDialog, MoveReposDialog } from "./RepoGroups";
-import {
-  BatchReport,
-  type BatchProgress,
-  type BatchResult,
-} from "./BatchReport";
+import { BatchReport, type BatchResult } from "./BatchReport";
 import { HistoryView } from "./HistoryView";
 import { Dialog } from "./Dialog";
 import { BranchDialog } from "./BranchDialog";
@@ -61,7 +65,11 @@ import {
   type Layout,
 } from "./preferences";
 const REPO_ROW_HEIGHT = 30;
-const emptyHistory: History = { commits: [], hasMore: false, shallow: false };
+const emptyHistory: import("./types").History = {
+  commits: [],
+  hasMore: false,
+  shallow: false,
+};
 function time(t: number | null | undefined) {
   if (!t) return "尚未获取";
   const date = new Date(t * 1000);
@@ -111,27 +119,20 @@ export default function App() {
   const [movePaths, setMovePaths] = useState<string[] | null>(null);
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [batch, setBatch] = useState<BatchProgress | null>(null);
-  const batchGuard = useRef(false);
   const groupGuard = useRef(false);
   const groupRevision = useRef(0);
-  const [statuses, setStatuses] = useState<Record<string, RepoStatus>>({});
-  const [failures, setFailures] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState("");
   const [busy, setBusy] = useState<Set<string>>(new Set());
-  const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState(false);
   const [tab, setTab] = useState<"history" | "logs">("history");
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [history, setHistory] = useState<History | null>(null);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState("");
   const [allBranches, setAllBranches] = useState(false);
-  const allBranchesRef = useRef(allBranches);
-  allBranchesRef.current = allBranches;
-  const [limit, setLimit] = useState(100);
   const [notice, setNotice] = useState("");
+  const [acquire, setAcquire] = useState<"clone" | "scan" | null>(null);
+  const [previewRepo, setPreviewRepo] = useState<Repo | null>(null);
+  const [searchRepo, setSearchRepo] = useState<Repo | null>(null);
+  const [compareRepo, setCompareRepo] = useState<Repo | null>(null);
   const [adding, setAdding] = useState(false);
   const [branchRepo, setBranchRepo] = useState<Repo | null>(null);
   const [branchRevision, setBranchRevision] = useState(0);
@@ -183,23 +184,33 @@ export default function App() {
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
   }, []);
-  const maximumPanelHeight = Math.max(
-    106,
-    viewportHeight -
-      380 -
-      (notice ? 60 : 0) -
-      (batch ? viewportHeight * 0.23 + 8 : 0) -
-      (!desktop ? 30 : 0),
-  );
   const repoRef = useRef(repos);
   repoRef.current = repos;
   const busyRef = useRef(new Set<string>());
-  const refreshGuard = useRef(false);
-  const lastRefresh = useRef(0);
-  const request = useRef(0);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
   const mounted = useRef(true);
+  const {
+    statuses,
+    setStatuses,
+    failures,
+    setFailures,
+    refreshing,
+    readStatus,
+    refresh,
+  } = useRepositoryStatus(repoRef, busyRef, selectedRef, mounted);
+  const statusFingerprint =
+    selected && statuses[selected]
+      ? `${statuses[selected].head}:${statuses[selected].branch}:${statuses[selected].ahead}:${statuses[selected].behind}`
+      : "";
+  const {
+    history,
+    historyLoading,
+    historyError,
+    limit,
+    setLimit,
+    loadHistory,
+  } = useRepositoryHistory(selected, allBranches, statusFingerprint);
   const repoListRequest = useRef(0);
   const reloadRepos = useCallback(async () => {
     const id = ++repoListRequest.current;
@@ -250,44 +261,6 @@ export default function App() {
       setNotice(errorText(e));
     }
   }, []);
-  const readStatus = useCallback(async (repo: Repo) => {
-    try {
-      const s = await api.status(repo.path);
-      if (!mounted.current) return;
-      setStatuses((old) => ({ ...old, [repo.path]: s }));
-      setFailures((old) => {
-        const next = { ...old };
-        delete next[repo.path];
-        return next;
-      });
-    } catch (e) {
-      if (mounted.current)
-        setFailures((old) => ({ ...old, [repo.path]: errorText(e) }));
-    }
-  }, []);
-  const refresh = useCallback(
-    async (force = false) => {
-      if (
-        refreshGuard.current ||
-        Date.now() - lastRefresh.current < (force ? 1000 : 10000)
-      )
-        return;
-      refreshGuard.current = true;
-      lastRefresh.current = Date.now();
-      setRefreshing(true);
-      try {
-        await pooled(
-          repoRef.current.filter((r) => !busyRef.current.has(r.path)),
-          readStatus,
-        );
-        await refreshLogs();
-      } finally {
-        refreshGuard.current = false;
-        if (mounted.current) setRefreshing(false);
-      }
-    },
-    [readStatus, refreshLogs],
-  );
   useEffect(() => {
     mounted.current = true;
     void reloadRepos()
@@ -308,47 +281,6 @@ export default function App() {
       window.removeEventListener("focus", focus);
     };
   }, [refresh, reloadRepos]);
-  const loadHistory = useCallback(async (path: string, count: number) => {
-    const id = ++request.current;
-    if (!path) {
-      setHistory(null);
-      setHistoryError("");
-      setHistoryLoading(false);
-      return;
-    }
-    setHistoryLoading(true);
-    setHistoryError("");
-    try {
-      const result = await api.history(path, count, allBranchesRef.current);
-      if (id === request.current && selectedRef.current === path)
-        setHistory(result);
-    } catch (e) {
-      if (id === request.current) setHistoryError(errorText(e));
-    } finally {
-      if (id === request.current) setHistoryLoading(false);
-    }
-  }, []);
-  useEffect(() => {
-    setLimit(100);
-    setHistory(null);
-    void loadHistory(selected, 100);
-  }, [selected, allBranches, loadHistory]);
-  const statusFingerprint =
-    selected && statuses[selected]
-      ? `${statuses[selected].head}:${statuses[selected].branch}:${statuses[selected].ahead}:${statuses[selected].behind}`
-      : "";
-  const lastFingerprint = useRef("");
-  useEffect(() => {
-    if (
-      statusFingerprint &&
-      lastFingerprint.current &&
-      statusFingerprint !== lastFingerprint.current
-    ) {
-      setLimit(100);
-      void loadHistory(selected, 100);
-    }
-    lastFingerprint.current = statusFingerprint;
-  }, [selected, statusFingerprint, loadHistory]);
   const runSync = useCallback(
     async (
       repo: Repo,
@@ -427,44 +359,17 @@ export default function App() {
         setNotice(errorText(e));
     }
   }
-  async function runBatch(targets: Repo[], fetchOnly = false) {
-    if (batchGuard.current || !targets.length) return;
-    batchGuard.current = true;
-    const queued: Repo[] = [],
-      results: BatchResult[] = [];
-    for (const target of targets) {
-      if (busyRef.current.has(target.path))
-        results.push({
-          repo: target,
-          outcome: "skipped",
-          message: "仓库正在操作",
-        });
-      else {
-        busyRef.current.add(target.path);
-        queued.push(target);
-      }
-    }
-    setBusy(new Set(busyRef.current));
-    setBatch({
-      label: fetchOnly ? "批量 Fetch" : "批量同步",
-      total: targets.length,
-      running: true,
-      results,
-    });
-    try {
-      await pooled(queued, async (target) => {
-        const result = await runSync(target, fetchOnly, undefined, true);
-        if (mounted.current)
-          setBatch((old) =>
-            old ? { ...old, results: [...old.results, result] } : old,
-          );
-      });
-    } finally {
-      batchGuard.current = false;
-      if (mounted.current)
-        setBatch((old) => (old ? { ...old, running: false } : old));
-    }
-  }
+  const { batch, setBatch, runBatch, stopBatch, retryFailed } =
+    useBatchOperations(repoRef, busyRef, mounted, setBusy, runSync);
+  const progress = useOperationProgress(busy.size > 0);
+  const maximumPanelHeight = Math.max(
+    106,
+    viewportHeight -
+      380 -
+      (notice ? 60 : 0) -
+      (batch ? viewportHeight * 0.23 + 8 : 0) -
+      (!desktop ? 30 : 0),
+  );
   async function changeBranch(
     target: Repo,
     reference: string,
@@ -629,6 +534,19 @@ export default function App() {
         label: "同步此仓库",
         disabled: operating,
         run: () => void runSync(target),
+      },
+      {
+        label: "同步前预览…",
+        disabled: operating,
+        run: () => setPreviewRepo(target),
+      },
+      {
+        label: "与上游比较…",
+        run: () => setCompareRepo(target),
+      },
+      {
+        label: "搜索提交…",
+        run: () => setSearchRepo(target),
       },
       {
         label: "切换分支…",
@@ -801,6 +719,12 @@ export default function App() {
           >
             {layout === "side" ? <Rows2 size={16} /> : <Columns2 size={16} />}
           </button>
+          <button disabled={!desktop} onClick={() => setAcquire("clone")}>
+            克隆仓库
+          </button>
+          <button disabled={!desktop} onClick={() => setAcquire("scan")}>
+            批量导入
+          </button>
           <span className="safety">
             <ShieldCheck size={13} />
             安全同步
@@ -884,7 +808,15 @@ export default function App() {
           </button>
         </div>
       )}
-      {batch && <BatchReport batch={batch} onClose={() => setBatch(null)} />}
+      {batch && (
+        <BatchReport
+          batch={batch}
+          onClose={() => setBatch(null)}
+          onStop={stopBatch}
+          onRetry={retryFailed}
+          progress={progress}
+        />
+      )}
       <div
         className={`workspace ${isSide ? "side" : "stacked"} ${isSide && effectivePanelWidth < 300 ? "compact-sidebar" : ""}`}
         style={
@@ -1311,6 +1243,13 @@ export default function App() {
                   Fetch 此仓库
                 </button>
                 <button
+                  className="text-btn"
+                  disabled={busy.has(repo.path)}
+                  onClick={() => setPreviewRepo(repo)}
+                >
+                  同步预览
+                </button>
+                <button
                   className="icon-btn"
                   aria-label="当前仓库更多操作"
                   title="更多操作"
@@ -1399,6 +1338,20 @@ export default function App() {
             {tab === "history" && (
               <div className="history-options">
                 <button
+                  className="text-btn"
+                  disabled={!repo}
+                  onClick={() => repo && setSearchRepo(repo)}
+                >
+                  搜索提交
+                </button>
+                <button
+                  className="text-btn"
+                  disabled={!repo}
+                  onClick={() => repo && setCompareRepo(repo)}
+                >
+                  比较上游
+                </button>
+                <button
                   className="history-scope"
                   role="switch"
                   aria-checked={allBranches}
@@ -1423,6 +1376,7 @@ export default function App() {
             <HistoryView
               key={selected}
               repoPath={selected}
+              positionKey={`${selected}:${allBranches}`}
               history={selected ? history : emptyHistory}
               loading={historyLoading}
               error={historyError}
@@ -1434,38 +1388,7 @@ export default function App() {
               }}
             />
           ) : (
-            <div className="log-list" role="log" aria-label="Git 操作日志">
-              {selectedLogs.length ? (
-                selectedLogs.map((l, i) => (
-                  <div
-                    key={`${l.time}-${i}`}
-                    className={`log-entry ${l.level}`}
-                  >
-                    <time>
-                      {new Date(l.time * 1000).toLocaleTimeString("zh-CN", {
-                        hour12: false,
-                      })}
-                    </time>
-                    <span className="log-level">
-                      {l.level === "error"
-                        ? "失败"
-                        : l.level === "warning"
-                          ? "暂停"
-                          : l.level === "success"
-                            ? "完成"
-                            : "信息"}
-                    </span>
-                    <span>{l.message}</span>
-                  </div>
-                ))
-              ) : (
-                <div className="history-empty">
-                  <Terminal size={27} />
-                  <p>还没有操作日志</p>
-                  <span>同步过程与失败原因会记录在这里</span>
-                </div>
-              )}
-            </div>
+            <OperationLogs logs={logs} repos={repos} selected={selected} />
           )}
         </section>
       </div>
@@ -1489,6 +1412,52 @@ export default function App() {
           label={`仓库操作 · ${menu.repo.name}`}
           actions={menuActions(menu.repo)}
           onClose={() => setMenu(null)}
+        />
+      )}
+      {acquire && (
+        <AcquireDialog
+          mode={acquire}
+          onClose={() => setAcquire(null)}
+          onAdded={async (added) => {
+            const existing = new Set(repoRef.current.map((r) => r.path));
+            const addedCount = added.filter(
+              (r) => !existing.has(r.path),
+            ).length;
+            await reloadRepos();
+            await pooled(added, readStatus);
+            await refreshLogs();
+            if (added.length) {
+              setSelected(
+                (added.find((r) => !existing.has(r.path)) ?? added[0]).path,
+              );
+              setNotice(
+                `已处理 ${added.length} 个仓库，其中新增 ${addedCount} 个`,
+              );
+            }
+          }}
+        />
+      )}
+      {previewRepo && (
+        <SyncPreviewDialog
+          repo={previewRepo}
+          busy={busy.has(previewRepo.path)}
+          onClose={() => setPreviewRepo(null)}
+          onSync={() => {
+            void runSync(previewRepo);
+            setPreviewRepo(null);
+          }}
+        />
+      )}
+      {searchRepo && (
+        <HistorySearchDialog
+          repo={searchRepo}
+          onClose={() => setSearchRepo(null)}
+        />
+      )}
+      {compareRepo && (
+        <CompareDialog
+          repo={compareRepo}
+          onClose={() => setCompareRepo(null)}
         />
       )}
       {toolsOpen && <ToolSettingsDialog onClose={() => setToolsOpen(false)} />}

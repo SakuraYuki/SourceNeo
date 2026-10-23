@@ -60,6 +60,7 @@ pub struct RepoStatus {
     pub kind: StatusKind,
     pub message: String,
     pub error_kind: Option<String>,
+    pub reason: Option<String>,
     pub last_fetched: Option<u64>,
     pub checked_at: u64,
     pub shallow: bool,
@@ -104,13 +105,19 @@ pub struct CommitChanges {
     pub parent: Option<String>,
     pub files: Vec<ChangedFile>,
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogEntry {
     pub time: u64,
     pub path: String,
     pub level: String,
     pub message: String,
+    #[serde(default)]
+    pub operation: Option<String>,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub elapsed_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,4 +155,54 @@ pub fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryQuery {
+    pub field: String,
+    pub text: String,
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPage {
+    pub snapshot: String,
+    pub commits: Vec<Commit>,
+    pub has_more: bool,
+    pub shallow: bool,
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Comparison {
+    pub head: String,
+    pub upstream: String,
+    pub target: String,
+    pub local: History,
+    pub remote: History,
+    pub files: Vec<ChangedFile>,
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPreview {
+    pub status: RepoStatus,
+    pub remote: Option<String>,
+    pub policy: String,
+    pub steps: Vec<String>,
+    pub blockers: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationProgress {
+    pub path: String,
+    pub operation: String,
+    pub stage: String,
+    pub started_at: u64,
+    pub elapsed_ms: u64,
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanResult {
+    pub repos: Vec<Repo>,
+    pub warnings: Vec<String>,
+    pub truncated: bool,
 }

@@ -1,9 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { GitCommitHorizontal, ChevronDown, GitBranch } from "lucide-react";
 import type { Commit, History } from "./types";
-import { layoutGraph, palette, segmentPath } from "./graph";
+import {
+  createGraphLayout,
+  palette,
+  segmentPath,
+  type GraphRow,
+} from "./graph";
 import { CommitDetails } from "./CommitDetails";
 const ROW = 32;
+const positions = new Map<string, { first: string; top: number }>();
 function refLabel(ref: string) {
   return ref.replace(/^refs\/(heads|remotes|tags)\//, "");
 }
@@ -14,6 +20,7 @@ export function HistoryView({
   error,
   onMore,
   onRetry,
+  positionKey,
 }: {
   repoPath: string;
   history: History | null;
@@ -21,12 +28,34 @@ export function HistoryView({
   error: string;
   onMore: () => void;
   onRetry: () => void;
+  positionKey?: string;
 }) {
   const container = useRef<HTMLDivElement>(null);
   const [scroll, setScroll] = useState(0);
   const [height, setHeight] = useState(400);
   const [selected, setSelected] = useState<Commit | null>(null);
-  const rows = useMemo(() => layoutGraph(history?.commits ?? []), [history]);
+  const graph = useRef({
+    commits: [] as Commit[],
+    rows: [] as GraphRow[],
+    append: createGraphLayout(),
+  });
+  const rows = useMemo(() => {
+    const commits = history?.commits ?? [];
+    const previous = graph.current;
+    if (
+      commits.length < previous.commits.length ||
+      !previous.commits.every((c, i) => c === commits[i])
+    ) {
+      graph.current = { commits: [], rows: [], append: createGraphLayout() };
+    }
+    const state = graph.current;
+    state.rows = [
+      ...state.rows,
+      ...state.append(commits.slice(state.commits.length)),
+    ];
+    state.commits = commits;
+    return state.rows;
+  }, [history]);
   const graphWidth = Math.max(64, ...rows.map((r) => r.width * 18 + 16));
   const showRows = !error && rows.length > 0;
   useEffect(() => {
@@ -39,9 +68,17 @@ export function HistoryView({
   }, [showRows]);
   useLayoutEffect(() => {
     setSelected(null);
-    setScroll(0);
-    if (container.current) container.current.scrollTop = 0;
-  }, [repoPath, history?.commits[0]?.hash, showRows]);
+    const remembered = positionKey ? positions.get(positionKey) : undefined;
+    const top =
+      remembered?.first === history?.commits[0]?.hash
+        ? Math.min(
+            remembered?.top ?? 0,
+            Math.max(0, (history?.commits.length ?? 0) * ROW - ROW),
+          )
+        : 0;
+    setScroll(top);
+    if (container.current) container.current.scrollTop = top;
+  }, [repoPath, positionKey, history?.commits[0]?.hash, showRows]);
   const start = Math.max(0, Math.floor(scroll / ROW) - 8),
     end = Math.min(rows.length, Math.ceil((scroll + height) / ROW) + 8);
   return (
@@ -79,7 +116,19 @@ export function HistoryView({
           <div
             className="history-scroll"
             ref={container}
-            onScroll={(e) => setScroll(e.currentTarget.scrollTop)}
+            onScroll={(e) => {
+              const top = e.currentTarget.scrollTop;
+              setScroll(top);
+              if (positionKey && history?.commits[0]) {
+                positions.delete(positionKey);
+                positions.set(positionKey, {
+                  first: history.commits[0].hash,
+                  top,
+                });
+                if (positions.size > 16)
+                  positions.delete(positions.keys().next().value!);
+              }
+            }}
           >
             <div
               style={{

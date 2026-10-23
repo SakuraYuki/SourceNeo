@@ -11,7 +11,11 @@ it("explains the actual reason instead of a generic attention label", () => {
     [{ kind: "attention", head: "(initial)", upstream: null }, "尚无提交"],
     [{ kind: "attention", branch: "(detached)", upstream: null }, "游离 HEAD"],
     [
-      { kind: "attention", message: "upstream 已失效，请检查远程分支" },
+      {
+        kind: "attention",
+        reason: "upstreamMissing",
+        message: "远程分支不可用",
+      },
       "上游已失效",
     ],
     [{ kind: "conflict", conflicts: ["file.txt"] }, "1 项冲突"],

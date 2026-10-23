@@ -9,7 +9,11 @@ use std::{
     collections::{HashMap, VecDeque},
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Condvar, Mutex,
+    },
+    time::Instant,
 };
 
 #[derive(Default, Serialize, Deserialize)]
@@ -34,6 +38,21 @@ impl Drop for Permit<'_> {
     }
 }
 impl Gate {
+    fn enter_cancelable(&self, cancel: &AtomicBool) -> Result<Permit<'_>> {
+        let mut n = self.count.lock().unwrap();
+        while *n >= 3 && !cancel.load(Ordering::Relaxed) {
+            n = self
+                .changed
+                .wait_timeout(n, std::time::Duration::from_millis(100))
+                .unwrap()
+                .0;
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(GitError::new("cancelled", "已取消排队中的克隆"));
+        }
+        *n += 1;
+        Ok(Permit(self))
+    }
     fn enter(&self) -> Permit<'_> {
         let mut n = self.count.lock().unwrap();
         while *n >= 3 {
@@ -49,12 +68,23 @@ enum Access {
     Write,
 }
 
+struct ActiveOperation {
+    operation: String,
+    stage: String,
+    started: Instant,
+    started_at: u64,
+}
+
 pub struct Service {
     config: PathBuf,
     saved: Mutex<Saved>,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     gate: Gate,
-    logs: Mutex<VecDeque<LogEntry>>,
+    journal: crate::journal::Journal,
+    snapshots: Mutex<VecDeque<crate::history::Snapshot>>,
+    snapshot_id: AtomicU64,
+    operations: Mutex<HashMap<String, ActiveOperation>>,
+    clones: Mutex<HashMap<String, Arc<AtomicBool>>>,
     errors: Mutex<HashMap<String, GitError>>,
 }
 impl Service {
@@ -67,6 +97,7 @@ impl Service {
         } else {
             Saved::default()
         };
+        let journal = crate::journal::Journal::new(config.with_file_name("operations.json"));
         Ok(Self {
             config,
             saved: Mutex::new(saved),
@@ -75,7 +106,11 @@ impl Service {
                 count: Mutex::new(0),
                 changed: Condvar::new(),
             },
-            logs: Mutex::new(VecDeque::new()),
+            journal,
+            snapshots: Mutex::new(VecDeque::new()),
+            snapshot_id: AtomicU64::new(1),
+            operations: Mutex::new(HashMap::new()),
+            clones: Mutex::new(HashMap::new()),
             errors: Mutex::new(HashMap::new()),
         })
     }
@@ -335,21 +370,25 @@ impl Service {
     }
     pub fn fetch(&self, path: &str, remote: Option<&str>) -> Result<RepoStatus> {
         let result = self.with_repo(path, Access::Write, |repo| {
-            git::check_locks(repo)?;
-            git::fetch_only(repo, remote)?;
-            let mut saved = self.saved.lock().unwrap();
-            let old = saved.fetched.insert(repo.common_dir.clone(), now());
-            if let Err(e) = self.persist(&saved) {
-                if let Some(time) = old {
-                    saved.fetched.insert(repo.common_dir.clone(), time);
-                } else {
-                    saved.fetched.remove(&repo.common_dir);
+            self.tracked(path, "Fetch", || {
+                git::check_locks(repo)?;
+                self.stage(path, "fetching");
+                git::fetch_only(repo, remote)?;
+                self.stage(path, "checking");
+                let mut saved = self.saved.lock().unwrap();
+                let old = saved.fetched.insert(repo.common_dir.clone(), now());
+                if let Err(e) = self.persist(&saved) {
+                    if let Some(time) = old {
+                        saved.fetched.insert(repo.common_dir.clone(), time);
+                    } else {
+                        saved.fetched.remove(&repo.common_dir);
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-            drop(saved);
-            self.errors.lock().unwrap().remove(path);
-            self.raw_status(repo)
+                drop(saved);
+                self.errors.lock().unwrap().remove(path);
+                self.raw_status(repo)
+            })
         });
         match &result {
             Ok(_) => self.log(path, "success", "已仅获取远端；本地分支和文件保持原状"),
@@ -408,17 +447,322 @@ impl Service {
         })
     }
     fn log(&self, path: &str, level: &str, message: impl AsRef<str>) {
-        let mut logs = self.logs.lock().unwrap();
-        logs.push_front(LogEntry {
+        let progress = self.progress().into_iter().find(|p| p.path == path);
+        self.journal.push(LogEntry {
             time: now(),
             path: git::redact(path),
             level: level.into(),
-            message: git::redact(message.as_ref()),
+            message: GitError::new("log", message).message,
+            operation: progress.as_ref().map(|p| p.operation.clone()),
+            stage: progress.as_ref().map(|p| p.stage.clone()),
+            elapsed_ms: progress.map(|p| p.elapsed_ms),
         });
-        logs.truncate(500);
     }
     pub fn logs(&self) -> Vec<LogEntry> {
-        self.logs.lock().unwrap().iter().cloned().collect()
+        self.journal.entries()
+    }
+    pub fn progress(&self) -> Vec<OperationProgress> {
+        self.operations
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(path, p)| OperationProgress {
+                path: path.clone(),
+                operation: p.operation.clone(),
+                stage: p.stage.clone(),
+                started_at: p.started_at,
+                elapsed_ms: p.started.elapsed().as_millis() as u64,
+            })
+            .collect()
+    }
+    fn stage(&self, path: &str, stage: &str) {
+        if let Some(p) = self.operations.lock().unwrap().get_mut(path) {
+            p.stage = stage.into();
+        }
+    }
+    fn tracked<T>(
+        &self,
+        path: &str,
+        operation: &str,
+        work: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.operations.lock().unwrap().insert(
+            path.into(),
+            ActiveOperation {
+                operation: operation.into(),
+                stage: "checking".into(),
+                started: Instant::now(),
+                started_at: now(),
+            },
+        );
+        self.log(path, "info", format!("开始{operation}"));
+        let result = work();
+        self.log(
+            path,
+            if result.is_ok() { "info" } else { "error" },
+            match &result {
+                Ok(_) => format!("{operation}已结束，请查看结果状态"),
+                Err(e) => e.message.clone(),
+            },
+        );
+        self.operations.lock().unwrap().remove(path);
+        result
+    }
+    pub fn history_page(
+        &self,
+        path: &str,
+        all: bool,
+        snapshot: Option<&str>,
+        offset: usize,
+        query: HistoryQuery,
+    ) -> Result<HistoryPage> {
+        self.with_repo(path, Access::ReadOnly, |repo| {
+            let state = if let Some(id) = snapshot {
+                self.snapshots
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|s| s.id == id && s.path == path && s.created.elapsed().as_secs() < 600)
+                    .cloned()
+                    .ok_or_else(|| GitError::new("snapshot", "历史快照已过期，请刷新历史后重试"))?
+            } else {
+                if offset != 0 {
+                    return Err(GitError::new("snapshot", "请从第一页开始读取"));
+                }
+                let id = self.snapshot_id.fetch_add(1, Ordering::Relaxed).to_string();
+                let state = crate::history::Snapshot::new(repo, id, all, query)?;
+                let mut cache = self.snapshots.lock().unwrap();
+                cache.push_front(state.clone());
+                cache.truncate(16);
+                state
+            };
+            let page = state.page(offset, 100)?;
+            Ok(HistoryPage {
+                snapshot: state.id,
+                commits: page.commits,
+                has_more: page.has_more,
+                shallow: page.shallow,
+            })
+        })
+    }
+    pub fn compare(&self, path: &str) -> Result<Comparison> {
+        self.with_repo(path, Access::ReadOnly, crate::history::compare)
+    }
+    pub fn compare_diff(&self, path: &str, head: &str, target: &str, file: &str) -> Result<String> {
+        self.with_repo(path, Access::ReadOnly, |repo| {
+            for oid in [head, target] {
+                if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(GitError::new("revision", "无效提交 SHA"));
+                }
+            }
+            let files = git::parse_changes(&git::tree_diff(
+                repo,
+                head,
+                Some(target),
+                &["--name-status", "-z"],
+                &[],
+            )?)?;
+            let changed = files
+                .iter()
+                .find(|f| f.path == file)
+                .ok_or_else(|| GitError::new("path", "文件不在比较结果中"))?;
+            let mut paths = vec![changed.path.as_str()];
+            if let Some(old) = &changed.old_path {
+                paths.push(old);
+            }
+            git::tree_diff(
+                repo,
+                head,
+                Some(target),
+                &["--patch", "--src-prefix=a/", "--dst-prefix=b/"],
+                &paths,
+            )
+        })
+    }
+    pub fn scan(&self, root: &str, depth: usize) -> Result<ScanResult> {
+        let _permit = self.gate.enter();
+        crate::acquisition::scan(root, depth)
+    }
+    pub fn clone_repo(&self, url: &str, parent: &str, name: &str) -> Result<Repo> {
+        let id = format!(
+            "internal-{}",
+            self.snapshot_id.fetch_add(1, Ordering::Relaxed)
+        );
+        self.clone_with_id(&id, url, parent, name)
+    }
+    pub fn cancel_clone(&self, id: &str) -> Result<()> {
+        let clones = self.clones.lock().unwrap();
+        let cancel = clones
+            .get(id)
+            .ok_or_else(|| GitError::new("clone", "克隆已结束或尚未开始，请查看当前结果"))?;
+        cancel.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+    pub fn clone_with_id(&self, id: &str, url: &str, parent: &str, name: &str) -> Result<Repo> {
+        if id.is_empty() || id.len() > 100 {
+            return Err(GitError::new("clone", "无效克隆任务标识"));
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut clones = self.clones.lock().unwrap();
+            if clones.contains_key(id) {
+                return Err(GitError::new("busy", "克隆任务已存在"));
+            }
+            clones.insert(id.into(), cancel.clone());
+        }
+        let result = (|| {
+            let target = crate::acquisition::clone_target(url, parent, name)?;
+            let path = target.to_string_lossy().into_owned();
+            let repo = {
+                let _permit = self.gate.enter_cancelable(&cancel)?;
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(GitError::new("cancelled", "已取消排队中的克隆"));
+                }
+                self.tracked(&path, "克隆", || {
+                    self.stage(&path, "cloning");
+                    crate::acquisition::clone_into(url, &target, &cancel)
+                })?
+            };
+            self.add(&repo.path).map_err(|e| {
+                GitError::new(
+                    &e.kind,
+                    format!(
+                        "克隆已成功，但加入列表失败：{}。仓库保留在 {}，可手动添加",
+                        e.message, repo.path
+                    ),
+                )
+            })
+        })();
+        self.clones.lock().unwrap().remove(id);
+        result
+    }
+    pub fn preview(&self, path: &str) -> Result<SyncPreview> {
+        self.with_repo(path, Access::ReadOnly, |repo| {
+            let status = self.raw_status(repo)?;
+            let mut preview = SyncPreview {
+                status,
+                remote: None,
+                policy: String::new(),
+                steps: vec!["获取远端并重新校验工作区、分支及同步策略".into()],
+                blockers: vec![],
+            };
+            let s = &preview.status;
+            if let Err(e) = git::check_locks(repo) {
+                preview.blockers.push(e.message);
+            }
+            if s.changed > 0 {
+                preview
+                    .blockers
+                    .push("存在未提交改动，整合和推送将暂停".into());
+            }
+            if s.operation.is_some()
+                || !s.conflicts.is_empty()
+                || s.upstream.is_none()
+                || s.head == "(initial)"
+                || s.branch == "(detached)"
+                || s.reason.as_deref() == Some("upstreamMissing")
+            {
+                preview.blockers.push(s.message.clone());
+            }
+            if s.upstream.is_some() && s.branch != "(detached)" {
+                let p = Path::new(path);
+                match git::run(
+                    p,
+                    &["config", "--get", &format!("branch.{}.remote", s.branch)],
+                ) {
+                    Ok(remote) => {
+                        let remote = remote.trim().to_owned();
+                        if remote == "." {
+                            preview.blockers.push("上游不是远程分支".into());
+                        }
+                        preview.remote = Some(git::redact(&remote));
+                    }
+                    Err(e) => preview.blockers.push(e.message),
+                }
+                match git::run(
+                    p,
+                    &[
+                        "config",
+                        "--null",
+                        "--get-all",
+                        &format!("branch.{}.merge", s.branch),
+                    ],
+                ) {
+                    Ok(merges) => {
+                        let values: Vec<_> = merges.split_terminator('\0').collect();
+                        if values.len() != 1 || !values[0].starts_with("refs/heads/") {
+                            preview.blockers.push("上游合并目标无效或不唯一".into());
+                        }
+                    }
+                    Err(e) => preview.blockers.push(e.message),
+                }
+                match sync_policy::read(p, &s.branch) {
+                    Ok(policy) => {
+                        let ff_only = policy.ff.as_deref() == Some("--ff-only")
+                            || (policy.rebase == Rebase::Unset && policy.ff.is_none());
+                        preview.policy = format!(
+                            "{}；{}",
+                            match policy.rebase {
+                                Rebase::Unset => "未配置 rebase",
+                                Rebase::Merge => "merge",
+                                Rebase::Linear => "rebase（继承 rebase.rebaseMerges）",
+                                Rebase::Merges => "rebase（保留合并）",
+                                Rebase::Interactive => "交互式 rebase",
+                            },
+                            policy
+                                .ff
+                                .as_deref()
+                                .unwrap_or("继承 Git merge.ff；无同步策略时仅允许快进")
+                        );
+                        if s.behind > 0 {
+                            if s.ahead > 0 && ff_only {
+                                preview.blockers.push("当前分叉，策略只允许快进".into());
+                            } else if s.ahead > 0 && policy.rebase == Rebase::Interactive {
+                                preview.blockers.push("需要在终端完成交互式 rebase".into());
+                            } else {
+                                preview.steps.push(
+                                    if s.ahead > 0
+                                        && matches!(policy.rebase, Rebase::Linear | Rebase::Merges)
+                                        && !ff_only
+                                    {
+                                        "按 Git 配置重放本地提交（rebase）"
+                                    } else if ff_only
+                                        || (s.ahead == 0
+                                            && matches!(
+                                                policy.rebase,
+                                                Rebase::Linear
+                                                    | Rebase::Merges
+                                                    | Rebase::Interactive
+                                            ))
+                                    {
+                                        "快进到已获取的上游提交"
+                                    } else {
+                                        "按 merge / ff 配置整合，可能创建合并提交"
+                                    }
+                                    .into(),
+                                );
+                            }
+                        }
+                        if s.ahead > 0
+                            || (s.behind > 0
+                                && !ff_only
+                                && !matches!(
+                                    policy.rebase,
+                                    Rebase::Linear | Rebase::Merges | Rebase::Interactive
+                                ))
+                        {
+                            preview.steps.push("必要时普通推送当前分支到上游".into());
+                        } else {
+                            preview
+                                .steps
+                                .push("若远端引用和策略保持不变，可能无需推送".into());
+                        }
+                    }
+                    Err(e) => preview.blockers.push(e.message),
+                }
+            }
+            Ok(preview)
+        })
     }
     fn assert_unchanged(&self, repo: &Repo, expected: &RepoStatus) -> Result<RepoStatus> {
         git::check_locks(repo)?;
@@ -493,6 +837,7 @@ impl Service {
         )
         .ok()
         .map(|oid| oid.trim().to_owned());
+        self.stage(&repo.path, "fetching");
         self.log(&repo.path, "info", format!("获取远程更新 · {remote}"));
         git::fetch_only(repo, Some(remote))?;
         {
@@ -500,6 +845,7 @@ impl Service {
             saved.fetched.insert(repo.common_dir.clone(), now());
             self.persist(&saved)?;
         }
+        self.stage(&repo.path, "checking");
         let mut s = self.raw_status(repo)?;
         if before.branch != s.branch || before.head != s.head || before.upstream != s.upstream {
             return Err(GitError::new(
@@ -564,6 +910,7 @@ impl Service {
             // Pin the fetched commit; do not fetch again through pull, autostash,
             // or rewrite other local branches through rebase.updateRefs.
             let mut expected_merge_head = None;
+            self.stage(&repo.path, "integrating");
             let result = if rebase {
                 sync_policy::protect_ignored(path, upstream_oid, replay_base)?;
                 self.assert_unchanged(repo, &s)?;
@@ -650,6 +997,7 @@ impl Service {
         if s.ahead > 0 {
             // Push the inspected commit, to the tracked branch, with ordinary fast-forward checks.
             // Ignore push.default, push refspecs, and followTags so unrelated branches are never pushed.
+            self.stage(&repo.path, "pushing");
             self.log(&repo.path, "info", format!("正常推送 · {} 个提交", s.ahead));
             git::run(
                 path,
@@ -671,7 +1019,9 @@ impl Service {
     pub fn sync(&self, path: &str) -> Result<RepoStatus> {
         self.log(path, "info", "开始同步");
         self.errors.lock().unwrap().remove(path);
-        let result = self.with_repo(path, Access::Write, |repo| self.sync_inner(repo));
+        let result = self.with_repo(path, Access::Write, |repo| {
+            self.tracked(path, "同步", || self.sync_inner(repo))
+        });
         if let Err(e) = &result {
             self.errors.lock().unwrap().insert(path.into(), e.clone());
             self.log(path, "error", &e.message);

@@ -88,3 +88,15 @@ it("preserves every pending ancestor in a dense DAG with many merges", () => {
   }
   expect(pending.size).toBe(0);
 });
+
+it("incremental layout matches a full layout across page boundaries", async () => {
+  const { createGraphLayout } = await import("./graph");
+  const { makeHistory } = await import("./test/fixtures");
+  const commits = makeHistory(220).commits;
+  commits[95].parents = [commits[96].hash, commits[110].hash];
+  const append = createGraphLayout();
+  expect([
+    ...append(commits.slice(0, 100)),
+    ...append(commits.slice(100)),
+  ]).toEqual(layoutGraph(commits));
+});

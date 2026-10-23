@@ -33,6 +33,7 @@ export interface RepoStatus {
   kind: Kind;
   message: string;
   errorKind: string | null;
+  reason?: string | null;
   lastFetched: number | null;
   checkedAt: number;
   shallow: boolean;
@@ -51,6 +52,9 @@ export interface History {
   shallow: boolean;
 }
 export interface LogEntry {
+  operation?: string | null;
+  stage?: string | null;
+  elapsedMs?: number | null;
   time: number;
   path: string;
   level: string;
@@ -85,4 +89,39 @@ export function errorText(e: unknown): string {
   return typeof e === "object" && e !== null && "message" in e
     ? String(e.message)
     : String(e);
+}
+
+export interface HistoryQuery {
+  field: "message" | "author" | "sha";
+  text: string;
+}
+export interface HistoryPage extends History {
+  snapshot: string;
+}
+export interface Comparison {
+  head: string;
+  upstream: string;
+  target: string;
+  local: History;
+  remote: History;
+  files: ChangedFile[];
+}
+export interface SyncPreview {
+  status: RepoStatus;
+  remote: string | null;
+  policy: string;
+  steps: string[];
+  blockers: string[];
+}
+export interface OperationProgress {
+  path: string;
+  operation: string;
+  stage: string;
+  startedAt: number;
+  elapsedMs: number;
+}
+export interface ScanResult {
+  repos: Repo[];
+  warnings: string[];
+  truncated: boolean;
 }

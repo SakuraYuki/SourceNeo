@@ -1,4 +1,7 @@
+pub mod acquisition;
 pub mod git;
+pub mod history;
+mod journal;
 pub mod model;
 pub mod service;
 mod sync_policy;
@@ -152,6 +155,110 @@ mod desktop {
         let s = state.inner().clone();
         blocking(move || s.diagnostic(&path)).await
     }
+    #[tauri::command]
+    pub async fn repo_history_page(
+        state: Backend<'_>,
+        path: String,
+        all_branches: bool,
+        snapshot: Option<String>,
+        offset: usize,
+        query: Option<HistoryQuery>,
+    ) -> Result<HistoryPage> {
+        let s = state.inner().clone();
+        blocking(move || {
+            s.history_page(
+                &path,
+                all_branches,
+                snapshot.as_deref(),
+                offset,
+                query.unwrap_or_default(),
+            )
+        })
+        .await
+    }
+    #[tauri::command]
+    pub async fn compare_upstream(state: Backend<'_>, path: String) -> Result<Comparison> {
+        let s = state.inner().clone();
+        blocking(move || s.compare(&path)).await
+    }
+    #[tauri::command]
+    pub async fn sync_preview(state: Backend<'_>, path: String) -> Result<SyncPreview> {
+        let s = state.inner().clone();
+        blocking(move || s.preview(&path)).await
+    }
+    #[tauri::command]
+    pub async fn scan_repositories(
+        state: Backend<'_>,
+        root: String,
+        depth: usize,
+    ) -> Result<ScanResult> {
+        let s = state.inner().clone();
+        blocking(move || s.scan(&root, depth)).await
+    }
+    #[tauri::command]
+    pub async fn clone_repository(
+        state: Backend<'_>,
+        url: String,
+        parent: String,
+        name: String,
+        request_id: String,
+    ) -> Result<Repo> {
+        let s = state.inner().clone();
+        blocking(move || s.clone_with_id(&request_id, &url, &parent, &name)).await
+    }
+    #[tauri::command]
+    pub fn cancel_clone(state: Backend<'_>, request_id: String) -> Result<()> {
+        state.cancel_clone(&request_id)
+    }
+    #[tauri::command]
+    pub fn operation_progress(state: Backend<'_>) -> Vec<OperationProgress> {
+        state.progress()
+    }
+    #[tauri::command]
+    pub async fn export_logs(
+        state: Backend<'_>,
+        destination: String,
+        path: Option<String>,
+    ) -> Result<()> {
+        let s = state.inner().clone();
+        blocking(move || {
+            let logs: Vec<_> = s
+                .logs()
+                .into_iter()
+                .filter(|l| {
+                    path.as_ref()
+                        .is_none_or(|p| l.path == super::git::redact(p))
+                })
+                .collect();
+            let destination = std::path::Path::new(&destination);
+            let parent = destination
+                .parent()
+                .ok_or_else(|| GitError::new("path", "无效导出路径"))?;
+            let mut file = tempfile::NamedTempFile::new_in(parent)
+                .map_err(|e| GitError::new("io", e.to_string()))?;
+            use std::io::Write;
+            file.write_all(
+                &serde_json::to_vec_pretty(&logs)
+                    .map_err(|e| GitError::new("io", e.to_string()))?,
+            )
+            .map_err(|e| GitError::new("io", e.to_string()))?;
+            file.persist(destination)
+                .map_err(|e| GitError::new("io", e.to_string()))?;
+            Ok(())
+        })
+        .await
+    }
+    #[tauri::command]
+    pub async fn compare_diff(
+        state: Backend<'_>,
+        path: String,
+        head: String,
+        target: String,
+        file: String,
+    ) -> Result<String> {
+        let s = state.inner().clone();
+        blocking(move || s.compare_diff(&path, &head, &target, &file)).await
+    }
     pub fn run() {
         tauri::Builder::default()
             .plugin(tauri_plugin_single_instance::init(|app, _, _| {
@@ -184,6 +291,15 @@ mod desktop {
                 Ok(())
             })
             .invoke_handler(tauri::generate_handler![
+                repo_history_page,
+                compare_upstream,
+                compare_diff,
+                sync_preview,
+                scan_repositories,
+                clone_repository,
+                cancel_clone,
+                operation_progress,
+                export_logs,
                 list_repos,
                 repo_groups,
                 edit_repo_groups,

@@ -4,7 +4,10 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -117,7 +120,7 @@ fn spawn_error(path: &Path, error: std::io::Error) -> GitError {
     }
 }
 pub fn run_timeout(path: &Path, args: &[&str], timeout: Duration) -> Result<String> {
-    run_output(path, args, timeout, false)
+    run_output(path, args, timeout, false, false, None)
 }
 
 // Internal read-only query: only the first ignored path is needed to refuse a
@@ -162,7 +165,7 @@ pub(crate) fn first_ignored_path(path: &Path, probes: &[String]) -> Result<Optio
         "--",
     ];
     args.extend(specs.iter().map(String::as_str));
-    let output = run_output(path, &args, Duration::from_secs(90), true)?;
+    let output = run_output(path, &args, Duration::from_secs(90), true, false, None)?;
     if output.is_empty() {
         return Ok(None);
     }
@@ -172,7 +175,14 @@ pub(crate) fn first_ignored_path(path: &Path, probes: &[String]) -> Result<Optio
         .ok_or_else(|| GitError::new("git", "忽略路径记录不完整，同步已暂停"))
 }
 
-fn run_output(path: &Path, args: &[&str], timeout: Duration, first_record: bool) -> Result<String> {
+fn run_output(
+    path: &Path,
+    args: &[&str],
+    timeout: Duration,
+    first_record: bool,
+    online_only: bool,
+    cancel: Option<&AtomicBool>,
+) -> Result<String> {
     check_directory(path)?;
     let mut command = Command::new("git");
     command
@@ -217,6 +227,9 @@ fn run_output(path: &Path, args: &[&str], timeout: Duration, first_record: bool)
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000 | 0x00000200);
     }
+    if online_only {
+        command.env("GIT_ALLOW_PROTOCOL", "https:ssh");
+    }
     let mut child = command.spawn().map_err(|e| spawn_error(path, e))?;
     let out = child.stdout.take().unwrap();
     let err = child.stderr.take().unwrap();
@@ -259,7 +272,8 @@ fn run_output(path: &Path, args: &[&str], timeout: Duration, first_record: bool)
         if status.is_some() && stdout.is_some() && stderr.is_some() {
             break;
         }
-        if start.elapsed() > timeout {
+        let cancelled = cancel.is_some_and(|flag| flag.load(Ordering::Relaxed));
+        if cancelled || start.elapsed() > timeout {
             #[cfg(unix)]
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
@@ -277,8 +291,12 @@ fn run_output(path: &Path, args: &[&str], timeout: Duration, first_record: bool)
             let _ = child.kill();
             let _ = child.wait();
             return Err(GitError::new(
-                "timeout",
-                "Git 操作超时，已停止等待并尝试终止本次进程树；请检查网络、SSH、凭据助手或 hooks",
+                if cancelled { "cancelled" } else { "timeout" },
+                if cancelled {
+                    "已取消克隆，已尝试终止本次进程树"
+                } else {
+                    "Git 操作超时，已停止等待并尝试终止本次进程树；请检查网络、SSH、凭据助手或 hooks"
+                },
             ));
         }
         thread::sleep(Duration::from_millis(20));
@@ -305,6 +323,28 @@ fn run_output(path: &Path, args: &[&str], timeout: Duration, first_record: bool)
     }
     Ok(String::from_utf8_lossy(&stdout).into_owned())
 }
+pub(crate) fn clone_online(
+    parent: &Path,
+    url: &str,
+    target: &Path,
+    cancel: &AtomicBool,
+) -> Result<String> {
+    run_output(
+        parent,
+        &[
+            "clone",
+            "--no-recurse-submodules",
+            "--",
+            url,
+            &target.to_string_lossy(),
+        ],
+        Duration::from_secs(900),
+        false,
+        true,
+        Some(cancel),
+    )
+}
+
 fn absolute(base: &Path, value: &str) -> Result<PathBuf> {
     // Remove only Git's record terminator, preserving whitespace in real path names.
     let value = value.strip_suffix('\n').unwrap_or(value);
@@ -386,6 +426,7 @@ pub fn inspect(repo: &Repo, last_fetched: Option<u64>) -> Result<RepoStatus> {
         kind: StatusKind::Synced,
         message: String::new(),
         error_kind: None,
+        reason: None,
         last_fetched,
         checked_at: now(),
         shallow: false,
@@ -455,6 +496,7 @@ pub fn inspect(repo: &Repo, last_fetched: Option<u64>) -> Result<RepoStatus> {
     } else if s.upstream.is_none() {
         (StatusKind::Attention, "尚未设置 upstream，请交给 AI 配置")
     } else if run(path, &["rev-parse", "--verify", "@{upstream}"]).is_err() {
+        s.reason = Some("upstreamMissing".into());
         (StatusKind::Attention, "upstream 已失效，请检查远程分支")
     } else if s.ahead > 0 && s.behind > 0 {
         (
@@ -657,7 +699,7 @@ fn commit_pair(repo: &Repo, hash: &str) -> Result<(String, Option<String>)> {
     Ok((oid, parent))
 }
 
-fn tree_diff(
+pub(crate) fn tree_diff(
     repo: &Repo,
     hash: &str,
     parent: Option<&str>,
@@ -695,6 +737,14 @@ pub fn commit_changes(repo: &Repo, hash: &str) -> Result<CommitChanges> {
         &["--name-status", "-z"],
         &[],
     )?;
+    Ok(CommitChanges {
+        hash,
+        parent,
+        files: parse_changes(&raw)?,
+    })
+}
+
+pub(crate) fn parse_changes(raw: &str) -> Result<Vec<ChangedFile>> {
     let mut fields = raw.split_terminator('\0');
     let mut files = Vec::new();
     while let Some(status) = fields.next() {
@@ -718,11 +768,7 @@ pub fn commit_changes(repo: &Repo, hash: &str) -> Result<CommitChanges> {
             status: status.into(),
         });
     }
-    Ok(CommitChanges {
-        hash,
-        parent,
-        files,
-    })
+    Ok(files)
 }
 
 pub fn file_diff(repo: &Repo, hash: &str, path: &str) -> Result<String> {

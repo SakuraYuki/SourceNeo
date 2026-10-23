@@ -54,6 +54,20 @@ SOURCENEO_CONFIG_DIR=/path/from/output/config npm run desktop
 - `src-tauri/src/lib.rs`：固定的 Tauri IPC 命令，阻塞工作移到后台执行。
 - `src/graph.ts`：以待访问祖先为图的轨道，所有出边都源自 Git 父提交。
 - `src/HistoryView.tsx`：SVG 图和虚拟列表。
-- `src/App.tsx`：多仓库界面及请求节流。
+- `src/App.tsx`：多仓库界面组合；`src/hooks/`：自适应刷新、历史缓存、批量任务与进度轮询。
+- `src-tauri/src/history.rs`：固定引用快照、增量分页、搜索和分支比较。
+- `src-tauri/src/acquisition.rs`：受限目录扫描、在线地址校验与新目录克隆。
+- `src-tauri/src/journal.rs`：脱敏日志的有界持久化与读取恢复。
 
-当前版本没有按行暂存、提交编辑器、冲突编辑器、交互式 rebase、AI API、后台自动同步或自动更新。历史超过 5,000 条、签名发布、Windows 实机交互和两端统一的内存基准仍需后续验证或扩展。
+当前版本没有按行暂存、提交编辑器、冲突编辑器、交互式 rebase、AI API、后台自动同步或自动更新。单次历史浏览仍以 5,000 条为上限，搜索可定位未加载历史；真实证书签名、Windows 实机交互和两端统一的内存基准仍需后续验证。
+
+
+## 性能基准
+
+```sh
+cargo run --locked --manifest-path src-tauri/Cargo.toml --no-default-features --example benchmark -- 20 1000
+```
+
+仅创建临时仓库和本地克隆，退出自动清理，不联网、不读取用户仓库。两个参数为仓库数（最多 200）和每仓库提交数（100–5,000）。输出三轮三并发状态刷新耗时、旧式累积历史与新式快照分页耗时、累计传输提交数。测试条件与本次结果见 [验证状态](validation.md)。
+
+可选签名工作流见 [签名构建](release-signing.md)。签名流程仅手动触发，不改变默认 CI 的未签名产物。

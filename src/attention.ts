@@ -83,7 +83,7 @@ export function attention(status?: RepoStatus, failure?: string) {
         ? "先检查并提交本地改动，再同步当前分支。"
         : "点击同步此仓库，按 Git 配置整合远端提交，再执行普通推送。",
     };
-  if (status.kind === "attention" && reason.includes("upstream 已失效"))
+  if (status.kind === "attention" && status.reason === "upstreamMissing")
     return {
       label: "上游已失效",
       reason,

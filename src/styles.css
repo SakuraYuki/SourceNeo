@@ -1689,3 +1689,205 @@ footer > span {
   color: var(--accent);
   background: var(--accent-bg);
 }
+
+/* Repository acquisition, investigation, and operation history. */
+.feature-modal {
+  width: min(620px, calc(100vw - 48px));
+  max-height: 85vh;
+  overflow: auto;
+}
+.feature-modal.wide-modal {
+  width: min(1000px, calc(100vw - 48px));
+}
+.feature-modal > label {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+}
+.feature-modal p {
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.feature-modal input:not([type="checkbox"]),
+.feature-modal select {
+  min-width: 0;
+  width: 100%;
+}
+.input-row,
+.search-controls,
+.log-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.input-row input,
+.search-controls > input,
+.log-tools input {
+  flex: 1;
+  min-width: 80px;
+}
+.input-row button,
+.search-controls button {
+  flex-shrink: 0;
+}
+.search-controls {
+  flex-wrap: wrap;
+}
+.search-controls select {
+  width: auto;
+}
+.search-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.scan-results,
+.import-results {
+  max-height: 260px;
+  overflow: auto;
+}
+.scan-item {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 0;
+}
+.scan-item span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.scan-item small {
+  display: block;
+  margin-top: 4px;
+  opacity: 0.65;
+}
+.preview-facts {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 12px;
+  line-height: 1.6;
+}
+.preview-facts dt {
+  opacity: 0.65;
+}
+.preview-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.commit-results {
+  max-height: 280px;
+  overflow: auto;
+}
+.commit-results button {
+  display: flex;
+  width: 100%;
+  text-align: left;
+  gap: 10px;
+  margin: 4px 0;
+  justify-content: flex-start;
+}
+.commit-results button > span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.commit-results small {
+  opacity: 0.65;
+}
+.comparison-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+.comparison-columns > section {
+  min-width: 0;
+}
+.compare-files {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow: auto;
+}
+.compare-files button {
+  justify-content: flex-start;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.comparison-patch {
+  overflow: auto;
+  max-height: 320px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--subtle);
+}
+.feature-modal .commit-inspector {
+  min-height: 250px;
+  margin-top: 16px;
+}
+.operation-logs {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.log-tools {
+  padding: 10px 14px;
+  flex-wrap: wrap;
+}
+.log-tools select {
+  max-width: 180px;
+}
+.operation-logs .log-list {
+  flex: 1;
+  min-height: 0;
+}
+.operation-logs .log-entry {
+  grid-template-columns: 160px 40px minmax(0, 1fr);
+}
+.log-retention {
+  padding: 8px 14px;
+  margin: 0;
+  font-size: 11px;
+  opacity: 0.65;
+}
+.batch-active {
+  display: flex;
+  gap: 8px 18px;
+  flex-wrap: wrap;
+  padding: 6px 0;
+  max-height: 76px;
+  overflow: auto;
+  font-size: 12px;
+}
+@media (max-width: 1040px) {
+  .header-actions .safety {
+    display: none;
+  }
+  .graph-legend {
+    display: none;
+  }
+}
+@media (max-width: 800px) {
+  .comparison-columns {
+    grid-template-columns: 1fr;
+  }
+  .commit-results small {
+    display: none;
+  }
+}
+
+.feature-modal input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  flex-shrink: 0;
+}
+.feature-modal .input-row input {
+  margin-top: 0;
+}
