@@ -1,0 +1,93 @@
+name: Signed desktop build (manual)
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to sign (requires its signing secrets)
+        required: true
+        type: choice
+        options: [macos, windows]
+permissions:
+  contents: read
+jobs:
+  signed:
+    runs-on: ${{ inputs.platform == 'macos' && 'macos-latest' || 'windows-latest' }}
+    environment: signing
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - run: rustup update stable --no-self-update
+      - run: rustup component add rustfmt clippy
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run build
+      - run: npm test
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features
+      - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Sign and notarize macOS app
+        if: inputs.platform == 'macos'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          node scripts/check-signing.mjs macos
+          npm run desktop:build -- --bundles app
+          codesign --verify --deep --strict src-tauri/target/release/bundle/macos/SourceNeo.app
+          xcrun stapler validate src-tauri/target/release/bundle/macos/SourceNeo.app
+          spctl --assess --type execute src-tauri/target/release/bundle/macos/SourceNeo.app
+          tar -czf SourceNeo-macos-signed.tar.gz -C src-tauri/target/release/bundle/macos SourceNeo.app
+          shasum -a 256 SourceNeo-macos-signed.tar.gz > SourceNeo-macos-signed.sha256
+      - name: Import Windows certificate and sign installer
+        if: inputs.platform == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          node scripts/check-signing.mjs windows
+          if ($LASTEXITCODE -ne 0) { throw 'Signing configuration is incomplete' }
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'sourceneo.pfx'
+          $configPath = Join-Path $env:RUNNER_TEMP 'sourceneo-signing.json'
+          try {
+            [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificates = @(Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password | Where-Object HasPrivateKey)
+            if ($certificates.Count -ne 1) { throw 'Expected one private signing key' }
+            $certificate = $certificates[0]
+            if (-not $certificate.HasPrivateKey) { throw 'Certificate has no private signing key' }
+            @{ bundle = @{ windows = @{ certificateThumbprint = $certificate.Thumbprint; digestAlgorithm = 'sha256'; timestampUrl = $env:WINDOWS_TIMESTAMP_URL } } } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 $configPath
+            npm run desktop:build -- --bundles nsis --config $configPath
+            if ($LASTEXITCODE -ne 0) { throw 'Signed build failed' }
+            $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe)
+            if ($installers.Count -eq 0) { throw 'Installer missing' }
+            foreach ($installer in $installers) {
+              $signature = Get-AuthenticodeSignature $installer.FullName
+              if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) { throw 'Installer signature validation failed' }
+              $hash = Get-FileHash $installer.FullName -Algorithm SHA256
+              "$($hash.Hash.ToLower())  $($installer.Name)" | Set-Content -Encoding utf8 "$($installer.FullName).sha256"
+            }
+          } finally {
+            Remove-Item $certificatePath -ErrorAction SilentlyContinue
+            Remove-Item $configPath -ErrorAction SilentlyContinue
+            if ($certificate) { Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -ErrorAction SilentlyContinue }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SourceNeo-${{ inputs.platform }}-signed
+          path: |
+            SourceNeo-macos-signed.tar.gz
+            SourceNeo-macos-signed.sha256
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.sha256
+          if-no-files-found: error
