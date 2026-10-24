@@ -159,7 +159,8 @@ pub fn clone_target(url: &str, parent: &str, name: &str) -> Result<PathBuf> {
             "请输入有效的新文件夹名称，不要包含路径分隔符",
         ));
     }
-    let parent = fs::canonicalize(parent).map_err(|e| GitError::new("path", e.to_string()))?;
+    // Git for Windows cannot reliably clone into a verbatim (\\?\) destination.
+    let parent = dunce::canonicalize(parent).map_err(|e| GitError::new("path", e.to_string()))?;
     if !parent.is_dir() {
         return Err(GitError::new("path", "目标父路径不是目录"));
     }

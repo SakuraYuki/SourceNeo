@@ -190,7 +190,10 @@ fn clone_validation_never_overwrites_and_rejects_local_or_credential_urls() {
         "ssh://git@example.test:2222/repo",
         "ssh://example.test:2222/repo",
     ] {
-        assert!(acquisition::clone_target(url, parent, "new").is_ok());
+        assert_eq!(
+            acquisition::clone_target(url, parent, "new").unwrap(),
+            dunce::canonicalize(temp.path()).unwrap().join("new")
+        );
     }
     for url in [
         "/tmp/local",

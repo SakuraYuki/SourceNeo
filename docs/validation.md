@@ -96,3 +96,4 @@ cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D w
 
 - npm、Cargo、Tauri 配置及界面版本统一为 `0.1.3`；TypeScript / Vite 构建、变更文件格式和锁文件一致性检查通过。
 - 首轮 Windows CI 暴露网络测试夹具的路径差异：`std::fs::canonicalize` 返回带 `\\?\` 前缀的路径，与应用保存的规范路径不一致，导致同步测试报告“仓库未添加到列表”。测试改用项目现有的 `dunce::canonicalize`，未修改网络传输实现；本地 4 项网络测试和 Rust 格式检查通过，最终两平台检查及打包结果以 Release 关联的 Actions 为准。
+- 后续 Windows 复测继续暴露克隆目标的同类问题：Git 在联网前无法写入带该前缀的目标目录。克隆父目录改用 `dunce::canonicalize`，保留规范化与已有目标拒绝检查，并在克隆地址 / 目标校验场景中断言返回的路径格式；网络代理场景继续验证克隆能到达预期代理端点。本地 5 项功能测试、4 项网络测试及 Rust 格式检查通过。
