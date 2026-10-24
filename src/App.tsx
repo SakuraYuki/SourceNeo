@@ -1620,7 +1620,7 @@ export default function App() {
         <span>
           遵循 Git 同步配置 · 普通推送 · 冲突时暂停
           <span className="footer-divider" />
-          v0.1.3
+          v0.1.4
         </span>
       </footer>
       {menu && repos.some((r) => r.path === menu.repo.path) && (
