@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { api } from "./api";
 import { Dialog } from "./Dialog";
 import { errorText, type Repo, type SyncPreview } from "./types";
+import { RefreshCw, X } from "lucide-react";
+import { IconButton } from "./IconButton";
 export function SyncPreviewDialog({
   repo,
   busy,
@@ -91,15 +93,22 @@ export function SyncPreviewDialog({
           </>
         )}
         <div className="modal-actions">
-          <button onClick={onClose}>关闭</button>
-          <button disabled={busy} onClick={() => setRevision((n) => n + 1)}>
-            重新预览
+          <button onClick={onClose}>
+            <X size={14} />
+            关闭
           </button>
+          <IconButton
+            label="重新预览"
+            icon={RefreshCw}
+            disabled={busy}
+            onClick={() => setRevision((n) => n + 1)}
+          />
           <button
             className="primary"
             disabled={busy || !preview || preview.blockers.length > 0}
             onClick={onSync}
           >
+            <RefreshCw size={14} />
             执行同步
           </button>
         </div>

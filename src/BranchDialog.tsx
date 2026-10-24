@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { GitBranch, X } from "lucide-react";
+import { GitBranch, X, RefreshCw } from "lucide-react";
+import { IconButton } from "./IconButton";
 import { api } from "./api";
 import { Dialog } from "./Dialog";
 import { errorText, type Branch, type Repo } from "./types";
@@ -142,15 +143,15 @@ export function BranchDialog({
           </>
         )}
         <div className="modal-actions">
-          <button
+          <IconButton
+            label="重新加载"
+            icon={RefreshCw}
             disabled={pending || loading}
             onClick={() => {
               setError("");
               setReload((n) => n + 1);
             }}
-          >
-            重新加载
-          </button>
+          />
           <button onClick={onClose}>取消</button>
         </div>
       </div>

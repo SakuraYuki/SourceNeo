@@ -3,6 +3,7 @@ pub mod git;
 pub mod history;
 mod journal;
 pub mod model;
+pub mod network;
 pub mod service;
 mod sync_policy;
 pub mod tools;
@@ -74,6 +75,18 @@ mod desktop {
     pub async fn working_changes(state: Backend<'_>, path: String) -> Result<Vec<ChangedFile>> {
         let s = state.inner().clone();
         blocking(move || s.working_changes(&path)).await
+    }
+    #[tauri::command]
+    pub async fn network_settings(state: Backend<'_>) -> Result<crate::network::NetworkSettings> {
+        Ok(state.network_settings())
+    }
+    #[tauri::command]
+    pub async fn save_network_settings(
+        state: Backend<'_>,
+        settings: crate::network::NetworkSettings,
+    ) -> Result<()> {
+        let s = state.inner().clone();
+        blocking(move || s.save_network_settings(settings)).await
     }
     #[tauri::command]
     pub async fn tool_settings(state: Backend<'_>) -> Result<crate::tools::ToolSettings> {
@@ -313,6 +326,8 @@ mod desktop {
                 working_diff,
                 fetch_remotes,
                 fetch_repo,
+                network_settings,
+                save_network_settings,
                 tool_settings,
                 save_tool_settings,
                 open_tool,

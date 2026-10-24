@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { Dialog } from "./Dialog";
 import { CommitDetails } from "./CommitDetails";
+import { Search } from "lucide-react";
 import {
   errorText,
   type Commit,
@@ -108,7 +109,10 @@ export function HistorySearchDialog({
             />
             全部分支
           </label>
-          <button disabled={busy || !query.text.trim()}>搜索</button>
+          <button className="primary" disabled={busy || !query.text.trim()}>
+            <Search size={14} />
+            搜索
+          </button>
         </form>
         {error && (
           <p role="alert" className="error-text">

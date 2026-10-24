@@ -120,7 +120,23 @@ fn spawn_error(path: &Path, error: std::io::Error) -> GitError {
     }
 }
 pub fn run_timeout(path: &Path, args: &[&str], timeout: Duration) -> Result<String> {
-    run_output(path, args, timeout, false, false, None)
+    run_output(path, args, timeout, false, false, None, None)
+}
+
+pub fn run_network(
+    path: &Path,
+    args: &[&str],
+    network: &crate::network::NetworkSettings,
+) -> Result<String> {
+    run_output(
+        path,
+        args,
+        Duration::from_secs(90),
+        false,
+        false,
+        None,
+        Some(network),
+    )
 }
 
 // Internal read-only query: only the first ignored path is needed to refuse a
@@ -165,7 +181,15 @@ pub(crate) fn first_ignored_path(path: &Path, probes: &[String]) -> Result<Optio
         "--",
     ];
     args.extend(specs.iter().map(String::as_str));
-    let output = run_output(path, &args, Duration::from_secs(90), true, false, None)?;
+    let output = run_output(
+        path,
+        &args,
+        Duration::from_secs(90),
+        true,
+        false,
+        None,
+        None,
+    )?;
     if output.is_empty() {
         return Ok(None);
     }
@@ -182,9 +206,13 @@ fn run_output(
     first_record: bool,
     online_only: bool,
     cancel: Option<&AtomicBool>,
+    network: Option<&crate::network::NetworkSettings>,
 ) -> Result<String> {
     check_directory(path)?;
     let mut command = Command::new("git");
+    if let Some(network) = network {
+        network.apply(&mut command);
+    }
     command
         .arg("--no-pager")
         .arg("-c")
@@ -295,7 +323,7 @@ fn run_output(
                 if cancelled {
                     "已取消克隆，已尝试终止本次进程树"
                 } else {
-                    "Git 操作超时，已停止等待并尝试终止本次进程树；请检查网络、SSH、凭据助手或 hooks"
+                    "Git 操作超时，已停止等待并尝试终止本次进程树；请检查网络和顶部“网络设置”中的代理，以及 SSH、凭据助手或 hooks"
                 },
             ));
         }
@@ -328,6 +356,7 @@ pub(crate) fn clone_online(
     url: &str,
     target: &Path,
     cancel: &AtomicBool,
+    network: &crate::network::NetworkSettings,
 ) -> Result<String> {
     run_output(
         parent,
@@ -342,6 +371,7 @@ pub(crate) fn clone_online(
         false,
         true,
         Some(cancel),
+        Some(network),
     )
 }
 
@@ -1025,6 +1055,14 @@ mod preview_safety_tests {
 }
 
 pub fn fetch_only(repo: &Repo, selected: Option<&str>) -> Result<()> {
+    fetch_with_network(repo, selected, &crate::network::NetworkSettings::default())
+}
+
+pub fn fetch_with_network(
+    repo: &Repo,
+    selected: Option<&str>,
+    network: &crate::network::NetworkSettings,
+) -> Result<()> {
     let path = Path::new(&repo.path);
     let remotes = fetch_remotes(repo)?;
     let branch = run(path, &["symbolic-ref", "--quiet", "--short", "HEAD"]).unwrap_or_default();
@@ -1117,6 +1155,6 @@ pub fn fetch_only(repo: &Repo, selected: Option<&str>) -> Result<()> {
         remote,
     ];
     args.extend(mappings.iter().map(String::as_str));
-    run(path, &args)?;
+    run_network(path, &args, network)?;
     Ok(())
 }

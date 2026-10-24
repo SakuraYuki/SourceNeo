@@ -7,6 +7,7 @@ import {
   renderHook,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AcquireDialog } from "./AcquireDialog";
@@ -256,6 +257,17 @@ it("allows cancelling an in-flight clone without registering a failed repository
   });
   fireEvent.click(screen.getByRole("button", { name: "克隆并添加" }));
   fireEvent.click(await screen.findByRole("button", { name: "取消克隆" }));
+  expect(api.cancelClone).not.toHaveBeenCalled();
+  const confirmation = screen.getByRole("dialog", { name: "取消克隆确认" });
+  fireEvent.click(within(confirmation).getByRole("button", { name: "取消" }));
+  expect(api.cancelClone).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "取消克隆" }));
+  fireEvent.click(
+    within(screen.getByRole("dialog", { name: "取消克隆确认" })).getByRole(
+      "button",
+      { name: "取消克隆" },
+    ),
+  );
   await screen.findByText("已取消克隆，目标目录保留");
   expect(api.cancelClone).toHaveBeenCalledWith(expect.any(String));
   expect(added).not.toHaveBeenCalled();

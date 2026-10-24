@@ -2,6 +2,8 @@ import { useState } from "react";
 import { api } from "./api";
 import { errorText, type LogEntry, type Repo } from "./types";
 import { stageLabels } from "./hooks/useOperationProgress";
+import { Download } from "lucide-react";
+import { IconButton } from "./IconButton";
 export function OperationLogs({
   logs,
   repos,
@@ -44,17 +46,17 @@ export function OperationLogs({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
-        <button
+        <IconButton
+          label="导出 JSON"
+          icon={Download}
           onClick={() => {
             setError("");
             void api
               .exportLogs(path || null)
               .catch((e) => setError(errorText(e)));
           }}
-          title="导出所选仓库的全部保留日志，不限搜索词"
-        >
-          导出 JSON
-        </button>
+          title="导出 JSON：所选仓库的全部保留日志，不限搜索词"
+        />
       </div>
       {error && (
         <p role="alert" className="error-text">

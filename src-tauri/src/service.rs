@@ -77,6 +77,7 @@ struct ActiveOperation {
 
 pub struct Service {
     config: PathBuf,
+    network: Mutex<crate::network::NetworkSettings>,
     saved: Mutex<Saved>,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     gate: Gate,
@@ -99,6 +100,9 @@ impl Service {
         };
         let journal = crate::journal::Journal::new(config.with_file_name("operations.json"));
         Ok(Self {
+            network: Mutex::new(crate::network::NetworkSettings::load(
+                &config.with_file_name("network.json"),
+            )?),
             config,
             saved: Mutex::new(saved),
             locks: Mutex::new(HashMap::new()),
@@ -211,6 +215,16 @@ impl Service {
     }
     pub fn tool_settings(&self) -> crate::tools::ToolSettings {
         self.saved.lock().unwrap().tools.clone()
+    }
+    pub fn network_settings(&self) -> crate::network::NetworkSettings {
+        self.network.lock().unwrap().clone()
+    }
+    pub fn save_network_settings(&self, settings: crate::network::NetworkSettings) -> Result<()> {
+        let settings = settings.validated()?;
+        let mut current = self.network.lock().unwrap();
+        settings.save(&self.config.with_file_name("network.json"))?;
+        *current = settings;
+        Ok(())
     }
     pub fn save_tool_settings(&self, settings: crate::tools::ToolSettings) -> Result<()> {
         let mut saved = self.saved.lock().unwrap();
@@ -373,7 +387,7 @@ impl Service {
             self.tracked(path, "Fetch", || {
                 git::check_locks(repo)?;
                 self.stage(path, "fetching");
-                git::fetch_only(repo, remote)?;
+                git::fetch_with_network(repo, remote, &self.network_settings())?;
                 self.stage(path, "checking");
                 let mut saved = self.saved.lock().unwrap();
                 let old = saved.fetched.insert(repo.common_dir.clone(), now());
@@ -620,7 +634,12 @@ impl Service {
                 }
                 self.tracked(&path, "克隆", || {
                     self.stage(&path, "cloning");
-                    crate::acquisition::clone_into(url, &target, &cancel)
+                    crate::acquisition::clone_with_network(
+                        url,
+                        &target,
+                        &cancel,
+                        &self.network_settings(),
+                    )
                 })?
             };
             self.add(&repo.path).map_err(|e| {
@@ -782,6 +801,7 @@ impl Service {
         Ok(actual)
     }
     fn sync_inner(&self, repo: &Repo) -> Result<RepoStatus> {
+        let network = self.network_settings();
         git::check_locks(repo)?;
         let before = self.raw_status(repo)?;
         if !before.conflicts.is_empty() || before.operation.is_some() {
@@ -839,7 +859,7 @@ impl Service {
         .map(|oid| oid.trim().to_owned());
         self.stage(&repo.path, "fetching");
         self.log(&repo.path, "info", format!("获取远程更新 · {remote}"));
-        git::fetch_only(repo, Some(remote))?;
+        git::fetch_with_network(repo, Some(remote), &network)?;
         {
             let mut saved = self.saved.lock().unwrap();
             saved.fetched.insert(repo.common_dir.clone(), now());
@@ -999,7 +1019,7 @@ impl Service {
             // Ignore push.default, push refspecs, and followTags so unrelated branches are never pushed.
             self.stage(&repo.path, "pushing");
             self.log(&repo.path, "info", format!("正常推送 · {} 个提交", s.ahead));
-            git::run(
+            git::run_network(
                 path,
                 &[
                     "-c",
@@ -1010,6 +1030,7 @@ impl Service {
                     remote,
                     &format!("{}:{merge}", s.head),
                 ],
+                &network,
             )?;
         }
         let s = self.raw_status(repo)?;

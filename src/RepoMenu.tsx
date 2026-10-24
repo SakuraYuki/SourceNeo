@@ -1,8 +1,10 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import type { LucideIcon } from "lucide-react";
 
 export interface MenuAction {
   label: string;
+  icon?: LucideIcon;
   run: () => void;
   disabled?: boolean;
   danger?: boolean;
@@ -140,6 +142,7 @@ export function RepoMenu({
             action.run();
           }}
         >
+          {action.icon && <action.icon size={14} aria-hidden="true" />}
           {action.label}
         </button>
       ))}

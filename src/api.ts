@@ -76,6 +76,10 @@ export const api = {
   remotes: (path: string) => invoke<string[]>("fetch_remotes", { path }),
   toolSettings: () =>
     invoke<{ terminal: string; editor: string }>("tool_settings"),
+  networkSettings: () =>
+    invoke<{ proxy: string; bypass: string }>("network_settings"),
+  saveNetworkSettings: (settings: { proxy: string; bypass: string }) =>
+    invoke<void>("save_network_settings", { settings }),
   saveToolSettings: (settings: { terminal: string; editor: string }) =>
     invoke<void>("save_tool_settings", { settings }),
   openTool: (path: string, kind: string) =>

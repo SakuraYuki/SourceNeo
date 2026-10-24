@@ -3,6 +3,8 @@ import { SyncPreviewDialog } from "./SyncPreviewDialog";
 import { HistorySearchDialog } from "./HistorySearchDialog";
 import { CompareDialog } from "./CompareDialog";
 import { OperationLogs } from "./OperationLogs";
+import { IconButton } from "./IconButton";
+import { PopConfirm } from "./PopConfirm";
 import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
 import { useRepositoryHistory } from "./hooks/useRepositoryHistory";
 import { useBatchOperations } from "./hooks/useBatchOperations";
@@ -34,6 +36,18 @@ import {
   Moon,
   Columns2,
   Rows2,
+  Download,
+  FolderInput,
+  FolderOpen,
+  GitCompareArrows,
+  GitPullRequestArrow,
+  ClipboardCopy,
+  Copy,
+  FileCode2,
+  FileSearch,
+  FolderMinus,
+  ListX,
+  ScanSearch,
 } from "lucide-react";
 import { api, desktop, pooled } from "./api";
 import {
@@ -51,6 +65,7 @@ import { Dialog } from "./Dialog";
 import { BranchDialog } from "./BranchDialog";
 import { AttentionDialog } from "./AttentionDialog";
 import { ToolSettingsDialog } from "./ExternalTools";
+import { NetworkSettingsDialog } from "./NetworkSettings";
 import { RepoMenu, type MenuAction } from "./RepoMenu";
 import { attention } from "./attention";
 import {
@@ -143,6 +158,7 @@ export default function App() {
     origin: HTMLElement;
   } | null>(null);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [networkOpen, setNetworkOpen] = useState(false);
   const toolBusy = useRef(new Set<string>());
   const [openingTools, setOpeningTools] = useState<Set<string>>(new Set());
   const remoteRequest = useRef(0);
@@ -164,6 +180,7 @@ export default function App() {
   }
   const [pathInput, setPathInput] = useState("");
   const [remove, setRemove] = useState<Repo | null>(null);
+  const [removeOrigin, setRemoveOrigin] = useState<HTMLElement | null>(null);
   const [removeError, setRemoveError] = useState("");
   const [removeSubmitting, setRemoveSubmitting] = useState(false);
   const removeSession = useRef(0);
@@ -359,16 +376,17 @@ export default function App() {
         setNotice(errorText(e));
     }
   }
-  const { batch, setBatch, runBatch, stopBatch, retryFailed } =
-    useBatchOperations(repoRef, busyRef, mounted, setBusy, runSync);
+  const { batch, runBatch, stopBatch, retryFailed } = useBatchOperations(
+    repoRef,
+    busyRef,
+    mounted,
+    setBusy,
+    runSync,
+  );
   const progress = useOperationProgress(busy.size > 0);
   const maximumPanelHeight = Math.max(
     106,
-    viewportHeight -
-      380 -
-      (notice ? 60 : 0) -
-      (batch ? viewportHeight * 0.23 + 8 : 0) -
-      (!desktop ? 30 : 0),
+    viewportHeight - 380 - (notice ? 60 : 0) - (!desktop ? 30 : 0),
   );
   async function changeBranch(
     target: Repo,
@@ -522,39 +540,47 @@ export default function App() {
     return [
       {
         label: "Fetch 此仓库",
+        icon: Download,
         disabled: operating,
         run: () => void runSync(target, true),
       },
       {
         label: "选择获取远端…",
+        icon: FolderOpen,
         disabled: operating,
         run: () => void chooseFetch(target),
       },
       {
         label: "同步此仓库",
+        icon: RefreshCw,
         disabled: operating,
         run: () => void runSync(target),
       },
       {
         label: "同步前预览…",
+        icon: ScanSearch,
         disabled: operating,
         run: () => setPreviewRepo(target),
       },
       {
         label: "与上游比较…",
+        icon: GitCompareArrows,
         run: () => setCompareRepo(target),
       },
       {
         label: "搜索提交…",
+        icon: Search,
         run: () => setSearchRepo(target),
       },
       {
         label: "切换分支…",
+        icon: GitBranch,
         disabled: operating,
         run: () => setBranchRepo(target),
       },
       {
         label: "查看未提交文件 / 处理建议",
+        icon: FileSearch,
         run: () => {
           setIssuesPath(target.path);
           setIssuesOpen(true);
@@ -562,22 +588,26 @@ export default function App() {
       },
       {
         label: "在终端打开",
+        icon: Terminal,
         separator: true,
         disabled: openingTools.has(target.path),
         run: () => void openTool(target, "terminal"),
       },
       {
         label: "在编辑器打开",
+        icon: FileCode2,
         disabled: openingTools.has(target.path),
         run: () => void openTool(target, "editor"),
       },
       {
         label: "移动到分组…",
+        icon: FolderInput,
         separator: true,
         run: () => setMovePaths([target.path]),
       },
       {
         label: "复制仓库路径",
+        icon: Copy,
         separator: true,
         run: () => {
           void api
@@ -588,17 +618,20 @@ export default function App() {
       },
       {
         label: "复制诊断给 AI",
+        icon: ClipboardCopy,
         run: () => void copyDiagnostic(target.path),
       },
-      { label: "外部工具设置", run: () => setToolsOpen(true) },
+      { label: "外部工具设置", icon: Settings2, run: () => setToolsOpen(true) },
       {
         label: "从列表移除…",
+        icon: FolderMinus,
         separator: true,
         danger: true,
         disabled: operating,
         run: () => {
           removeSession.current++;
           setRemoveError("");
+          setRemoveOrigin(menu?.origin ?? null);
           setRemove(target);
         },
       },
@@ -719,16 +752,28 @@ export default function App() {
           >
             {layout === "side" ? <Rows2 size={16} /> : <Columns2 size={16} />}
           </button>
-          <button disabled={!desktop} onClick={() => setAcquire("clone")}>
-            克隆仓库
-          </button>
-          <button disabled={!desktop} onClick={() => setAcquire("scan")}>
-            批量导入
-          </button>
+          <IconButton
+            label="克隆仓库"
+            icon={GitPullRequestArrow}
+            disabled={!desktop}
+            onClick={() => setAcquire("clone")}
+          />
+          <IconButton
+            label="批量导入"
+            icon={FolderInput}
+            disabled={!desktop}
+            onClick={() => setAcquire("scan")}
+          />
           <span className="safety">
             <ShieldCheck size={13} />
             安全同步
           </span>
+          <IconButton
+            label="网络设置"
+            icon={Settings2}
+            disabled={!desktop}
+            onClick={() => setNetworkOpen(true)}
+          />
           <button
             className="icon-btn"
             title="刷新本地状态（不会访问远程）"
@@ -753,13 +798,13 @@ export default function App() {
             )}
             同步全部{repos.length > 0 && <kbd>{repos.length}</kbd>}
           </button>
-          <button
+          <IconButton
+            label="Fetch 全部"
+            icon={Download}
             disabled={!repos.length || busy.size > 0 || batch?.running}
             onClick={() => void runBatch(repoRef.current, true)}
-            title="仅获取远程对象和远程跟踪引用"
-          >
-            Fetch 全部
-          </button>
+            title="Fetch 全部：仅获取远程对象和远程跟踪引用"
+          />
         </div>
       </header>
       <section className="workspace-heading">
@@ -787,6 +832,12 @@ export default function App() {
             <ChevronDown size={12} />
           </button>
           <span className="muted">{repos.length} 个仓库</span>
+          <BatchReport
+            batch={batch}
+            onStop={stopBatch}
+            onRetry={retryFailed}
+            progress={progress}
+          />
         </div>
       </section>
       {!desktop && (
@@ -807,15 +858,6 @@ export default function App() {
             <X size={14} />
           </button>
         </div>
-      )}
-      {batch && (
-        <BatchReport
-          batch={batch}
-          onClose={() => setBatch(null)}
-          onStop={stopBatch}
-          onRetry={retryFailed}
-          progress={progress}
-        />
       )}
       <div
         className={`workspace ${isSide ? "side" : "stacked"} ${isSide && effectivePanelWidth < 300 ? "compact-sidebar" : ""}`}
@@ -869,13 +911,12 @@ export default function App() {
                 <Settings2 size={14} />
               </button>
               <button
-                className="text-btn"
+                className="icon-btn"
                 aria-label="添加仓库"
                 title="添加仓库"
                 onClick={() => void pick()}
               >
                 <Plus size={15} />
-                <span>添加仓库</span>
               </button>
               <button
                 className="icon-btn"
@@ -910,29 +951,29 @@ export default function App() {
             )}
             {checkedRepos.length > 0 && (
               <>
-                <button
-                  className="text-btn"
+                <IconButton
+                  label="清空选择"
+                  icon={ListX}
                   onClick={() => setChecked(new Set())}
-                >
-                  清空选择
-                </button>
+                />
                 <button
                   disabled={batch?.running}
                   onClick={() => void runBatch(checkedRepos)}
                 >
+                  <RefreshCw size={13} />
                   同步所选
                 </button>
-                <button
+                <IconButton
+                  label="Fetch 所选"
+                  icon={Download}
                   disabled={batch?.running}
                   onClick={() => void runBatch(checkedRepos, true)}
-                >
-                  Fetch 所选
-                </button>
-                <button
+                />
+                <IconButton
+                  label="移动分组"
+                  icon={FolderInput}
                   onClick={() => setMovePaths(checkedRepos.map((r) => r.path))}
-                >
-                  移动分组
-                </button>
+                />
               </>
             )}
           </div>
@@ -1235,20 +1276,18 @@ export default function App() {
             </div>
             {repo && (
               <div className="detail-actions">
-                <button
-                  className="text-btn"
+                <IconButton
+                  label="Fetch 此仓库"
+                  icon={Download}
                   disabled={busy.has(repo.path)}
                   onClick={() => void runSync(repo, true)}
-                >
-                  Fetch 此仓库
-                </button>
-                <button
-                  className="text-btn"
+                />
+                <IconButton
+                  label="同步预览"
+                  icon={ScanSearch}
                   disabled={busy.has(repo.path)}
                   onClick={() => setPreviewRepo(repo)}
-                >
-                  同步预览
-                </button>
+                />
                 <button
                   className="icon-btn"
                   aria-label="当前仓库更多操作"
@@ -1283,15 +1322,14 @@ export default function App() {
                 <span>{attention(status, failures[selected]).reason}</span>
               </div>
               {isIssue(repo) && (
-                <button
-                  className="text-btn"
+                <IconButton
+                  label={status?.changed ? "查看未提交文件" : "查看处理建议"}
+                  icon={FileSearch}
                   onClick={() => {
                     setIssuesPath(selected);
                     setIssuesOpen(true);
                   }}
-                >
-                  {status?.changed ? "查看未提交文件" : "查看处理建议"}
-                </button>
+                />
               )}
               <button
                 className="text-btn"
@@ -1337,20 +1375,18 @@ export default function App() {
             <div className="tab-spacer" />
             {tab === "history" && (
               <div className="history-options">
-                <button
-                  className="text-btn"
+                <IconButton
+                  label="搜索提交"
+                  icon={Search}
                   disabled={!repo}
                   onClick={() => repo && setSearchRepo(repo)}
-                >
-                  搜索提交
-                </button>
-                <button
-                  className="text-btn"
+                />
+                <IconButton
+                  label="比较上游"
+                  icon={GitCompareArrows}
                   disabled={!repo}
                   onClick={() => repo && setCompareRepo(repo)}
-                >
-                  比较上游
-                </button>
+                />
                 <button
                   className="history-scope"
                   role="switch"
@@ -1461,6 +1497,9 @@ export default function App() {
         />
       )}
       {toolsOpen && <ToolSettingsDialog onClose={() => setToolsOpen(false)} />}
+      {networkOpen && (
+        <NetworkSettingsDialog onClose={() => setNetworkOpen(false)} />
+      )}
       {adding && (
         <Dialog label="添加本地仓库" onClose={closeAdd}>
           <form
@@ -1573,34 +1612,19 @@ export default function App() {
           }}
         />
       )}
-      {remove && (
-        <Dialog label="移除仓库" onClose={closeRemove}>
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="移除仓库"
-            className="modal"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2>移除 {remove.name}？</h2>
-            <p>仅从 SourceNeo 列表移除，磁盘上的仓库和所有改动都会保留。</p>
-            {removeError && (
-              <p className="error-text" role="alert">
-                {removeError}
-              </p>
-            )}
-            <div className="modal-actions">
-              <button onClick={closeRemove}>取消</button>
-              <button
-                className="danger"
-                disabled={removeSubmitting}
-                onClick={() => void removeRepo(remove)}
-              >
-                从列表移除
-              </button>
-            </div>
-          </div>
-        </Dialog>
+      {remove && removeOrigin && (
+        <PopConfirm
+          key={remove.path}
+          origin={removeOrigin}
+          label="移除仓库"
+          title={`移除 ${remove.name}？`}
+          description="仅从 SourceNeo 列表移除，磁盘上的仓库和所有改动都会保留。"
+          confirmText="从列表移除"
+          busy={removeSubmitting}
+          error={removeError}
+          onClose={closeRemove}
+          onConfirm={() => void removeRepo(remove)}
+        />
       )}
     </main>
   );

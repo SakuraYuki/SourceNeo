@@ -177,12 +177,26 @@ pub fn clone_into(
     target: &Path,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<Repo> {
+    clone_with_network(
+        url,
+        target,
+        cancel,
+        &crate::network::NetworkSettings::default(),
+    )
+}
+
+pub fn clone_with_network(
+    url: &str,
+    target: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+    network: &crate::network::NetworkSettings,
+) -> Result<Repo> {
     // Atomic reservation prevents two clone requests from sharing a destination.
     fs::create_dir(target).map_err(|e| GitError::new("path", format!("无法创建目标目录：{e}")))?;
     let parent = target
         .parent()
         .ok_or_else(|| GitError::new("path", "目标目录无效"))?;
-    git::clone_online(parent, url, target, cancel).map_err(|e| {
+    git::clone_online(parent, url, target, cancel, network).map_err(|e| {
         GitError::new(
             &e.kind,
             format!(

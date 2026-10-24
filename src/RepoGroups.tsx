@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { Dialog } from "./Dialog";
 import { errorText, type GroupEdit, type RepoGroup } from "./types";
+import { Pencil, Trash2 } from "lucide-react";
+import { IconButton } from "./IconButton";
+import { PopConfirm } from "./PopConfirm";
 
 export function RepoCheckbox({
   paths,
@@ -45,6 +48,10 @@ export function RepoGroupsDialog({
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const [removing, setRemoving] = useState<{
+    name: string;
+    origin: HTMLElement;
+  } | null>(null);
   const guard = useRef(false);
   async function submit(edit: GroupEdit) {
     if (guard.current) return;
@@ -55,8 +62,10 @@ export function RepoGroupsDialog({
       await onEdit(edit);
       setEditing(null);
       setName("");
+      return true;
     } catch (e) {
       setError(errorText(e));
+      return false;
     } finally {
       guard.current = false;
       setPending(false);
@@ -72,24 +81,27 @@ export function RepoGroupsDialog({
             <div className="group-editor-row" key={g.name}>
               <strong title={g.name}>{g.name}</strong>
               <span className="muted">{g.paths.length}</span>
-              <button
+              <IconButton
                 disabled={pending}
-                aria-label={`重命名分组 ${g.name}`}
+                label={`重命名分组 ${g.name}`}
+                icon={Pencil}
                 onClick={() => {
                   setEditing(g.name);
                   setName(g.name);
                   setError("");
                 }}
-              >
-                重命名
-              </button>
-              <button
+              />
+              <IconButton
+                className="danger-icon"
                 disabled={pending}
-                aria-label={`删除分组 ${g.name}`}
-                onClick={() => void submit({ action: "remove", group: g.name })}
-              >
-                删除
-              </button>
+                label={`删除分组 ${g.name}`}
+                icon={Trash2}
+                aria-haspopup="dialog"
+                onClick={(event) => {
+                  setError("");
+                  setRemoving({ name: g.name, origin: event.currentTarget });
+                }}
+              />
             </div>
           ))}
         </div>
@@ -114,7 +126,7 @@ export function RepoGroupsDialog({
             onChange={(e) => setName(e.target.value)}
             placeholder="例如：工作项目"
           />
-          {error && (
+          {error && !removing && (
             <p className="error-text" role="alert">
               {error}
             </p>
@@ -140,6 +152,25 @@ export function RepoGroupsDialog({
             </button>
           </div>
         </form>
+        {removing && (
+          <PopConfirm
+            origin={removing.origin}
+            label="删除分组确认"
+            title={`删除分组 ${removing.name}？`}
+            description="组内仓库会回到“未分组”，磁盘上的仓库和改动都会保留。"
+            confirmText="删除分组"
+            busy={pending}
+            error={error}
+            onClose={() => setRemoving(null)}
+            onConfirm={() => {
+              void submit({ action: "remove", group: removing.name }).then(
+                (success) => {
+                  if (success) setRemoving(null);
+                },
+              );
+            }}
+          />
+        )}
       </div>
     </Dialog>
   );

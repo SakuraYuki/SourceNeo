@@ -2,6 +2,9 @@ import { useRef, useState } from "react";
 import { api, pooled } from "./api";
 import { Dialog } from "./Dialog";
 import { errorText, type Repo, type ScanResult } from "./types";
+import { FolderOpen, CircleStop, Download, ScanSearch, X } from "lucide-react";
+import { IconButton } from "./IconButton";
+import { PopConfirm } from "./PopConfirm";
 
 export function AcquireDialog({
   mode,
@@ -21,6 +24,7 @@ export function AcquireDialog({
   const guard = useRef(false);
   const cloneId = useRef("");
   const [cancelling, setCancelling] = useState(false);
+  const [cancelOrigin, setCancelOrigin] = useState<HTMLElement | null>(null);
   const [error, setError] = useState("");
   const [scan, setScan] = useState<ScanResult | null>(null);
   const [checked, setChecked] = useState(new Set<string>());
@@ -40,6 +44,7 @@ export function AcquireDialog({
     if (guard.current) return;
     guard.current = true;
     setBusy(true);
+    setCancelOrigin(null);
     setError("");
     setResults([]);
     try {
@@ -155,14 +160,13 @@ export function AcquireDialog({
               }}
               placeholder="选择本地目录"
             />
-            <button
+            <IconButton
               type="button"
               disabled={busy}
-              aria-label="选择父目录"
+              label="选择父目录"
+              icon={FolderOpen}
               onClick={() => void choose()}
-            >
-              浏览…
-            </button>
+            />
           </div>
         </label>
         {mode === "clone" ? (
@@ -268,26 +272,30 @@ export function AcquireDialog({
           {mode === "clone" && busy && (
             <button
               type="button"
+              className="warning"
               disabled={cancelling}
-              onClick={() => {
-                setCancelling(true);
-                void api.cancelClone(cloneId.current).catch((e) => {
-                  setError(errorText(e));
-                  setCancelling(false);
-                });
-              }}
+              aria-haspopup="dialog"
+              onClick={(event) => setCancelOrigin(event.currentTarget)}
             >
+              <CircleStop size={13} />
               {cancelling ? "正在取消…" : "取消克隆"}
             </button>
           )}
           <button type="button" disabled={busy} onClick={onClose}>
+            <X size={14} />
             关闭
           </button>
           <button
+            className={mode === "clone" || !scan ? "primary" : ""}
             disabled={
               busy || !parent || (mode === "clone" && (!url.trim() || !name))
             }
           >
+            {mode === "clone" ? (
+              <Download size={14} />
+            ) : (
+              <ScanSearch size={14} />
+            )}
             {mode === "clone" ? "克隆并添加" : "扫描目录"}
           </button>
           {mode === "scan" && scan && (
@@ -302,6 +310,26 @@ export function AcquireDialog({
           )}
         </div>
       </form>
+      {mode === "clone" && busy && !cancelling && cancelOrigin && (
+        <PopConfirm
+          origin={cancelOrigin}
+          label="取消克隆确认"
+          title="停止克隆此仓库？"
+          description="本次克隆进程将终止，已下载的目标目录会保留，不会自动删除。"
+          confirmText="取消克隆"
+          tone="warning"
+          onClose={() => setCancelOrigin(null)}
+          onConfirm={() => {
+            setCancelOrigin(null);
+            if (!guard.current || cancelling) return;
+            setCancelling(true);
+            void api.cancelClone(cloneId.current).catch((e) => {
+              setError(errorText(e));
+              setCancelling(false);
+            });
+          }}
+        />
+      )}
     </Dialog>
   );
 }

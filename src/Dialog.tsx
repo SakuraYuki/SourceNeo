@@ -4,10 +4,12 @@ export function Dialog({
   label,
   onClose,
   children,
+  dismissible = true,
 }: {
   label: string;
   onClose: () => void;
   children: ReactNode;
+  dismissible?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -20,9 +22,12 @@ export function Dialog({
       ref={ref}
       className="modal-shell"
       aria-label={label}
-      onCancel={onClose}
+      onCancel={(e) => {
+        e.preventDefault();
+        if (dismissible) onClose();
+      }}
       onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (dismissible && e.target === e.currentTarget) onClose();
       }}
     >
       {children}

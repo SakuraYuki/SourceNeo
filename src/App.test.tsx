@@ -280,7 +280,15 @@ describe("repository groups and bulk actions", () => {
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "管理仓库分组" }));
     api.editGroups.mockResolvedValueOnce([]);
+    const editsBeforeConfirm = api.editGroups.mock.calls.length;
     fireEvent.click(screen.getByRole("button", { name: "删除分组 项目" }));
+    expect(api.editGroups).toHaveBeenCalledTimes(editsBeforeConfirm);
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "删除分组确认" })).getByRole(
+        "button",
+        { name: "删除分组" },
+      ),
+    );
     await waitFor(() =>
       expect(
         screen.queryByRole("button", { name: "删除分组 项目" }),

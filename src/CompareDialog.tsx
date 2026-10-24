@@ -3,6 +3,8 @@ import { api } from "./api";
 import { Dialog } from "./Dialog";
 import { CommitDetails } from "./CommitDetails";
 import { errorText, type Commit, type Comparison, type Repo } from "./types";
+import { RefreshCw, X } from "lucide-react";
+import { IconButton } from "./IconButton";
 export function CompareDialog({
   repo,
   onClose,
@@ -154,8 +156,15 @@ export function CompareDialog({
           />
         )}
         <div className="modal-actions">
-          <button onClick={onClose}>关闭</button>
-          <button onClick={() => setRevision((n) => n + 1)}>刷新比较</button>
+          <button onClick={onClose}>
+            <X size={14} />
+            关闭
+          </button>
+          <IconButton
+            label="刷新比较"
+            icon={RefreshCw}
+            onClick={() => setRevision((n) => n + 1)}
+          />
         </div>
       </div>
     </Dialog>
