@@ -91,3 +91,8 @@ cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D w
 - 在克隆副本中准备一个本地测试提交后，点击原生“Fetch 此仓库”，界面仍显示待推送 1 项，GitHub API 核对远端 SHA 未改变，确认 Fetch 不推送本地提交。
 - 点击原生“同步此仓库”，日志记录正常推送 1 个提交，同步耗时 7,391ms；GitHub API 返回的远端 SHA 与本地测试提交 `450b99b3822b83e577c9b8f969efa5b494d54657` 一致，界面恢复已同步、待推送 / 待拉取均为 0。此前真实外网 HTTPS 克隆与推送的原生成功路径缺口已补齐。
 - 完成后移除应用中的测试入口并恢复原有 14 个仓库，核对 `repositories.json` 和 `network.json` 与测试前逐字节一致。私有测试仓库和本地副本保留作验收证据；清单及相关操作日志位置见 `artifacts/latest-github-native-smoke.txt`，未提交项目改动。
+
+## v0.1.3 发布准备（2026-10-24）
+
+- npm、Cargo、Tauri 配置及界面版本统一为 `0.1.3`；TypeScript / Vite 构建、变更文件格式和锁文件一致性检查通过。
+- 首轮 Windows CI 暴露网络测试夹具的路径差异：`std::fs::canonicalize` 返回带 `\\?\` 前缀的路径，与应用保存的规范路径不一致，导致同步测试报告“仓库未添加到列表”。测试改用项目现有的 `dunce::canonicalize`，未修改网络传输实现；本地 4 项网络测试和 Rust 格式检查通过，最终两平台检查及打包结果以 Release 关联的 Actions 为准。

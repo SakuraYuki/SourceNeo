@@ -214,7 +214,8 @@ fn fetch_sync_clone_and_push_use_the_saved_proxy_in_real_git_processes() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("repo");
     fs::create_dir(&root).unwrap();
-    let root = fs::canonicalize(root).unwrap();
+    // Match the stored repository path on Windows, without the extended-length prefix.
+    let root = dunce::canonicalize(root).unwrap();
     fixture_git(&root, &["init", "-b", "main"]);
     fixture_git(&root, &["commit", "--allow-empty", "-m", "initial"]);
     fixture_git(
