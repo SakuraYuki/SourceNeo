@@ -22,6 +22,24 @@ afterEach(() => {
 });
 
 describe("history virtualization", () => {
+  it("shows commit time in local time with seconds instead of truncating it to a date", () => {
+    const history = makeHistory(1);
+    history.commits[0].date = new Date(2026, 11, 30, 13, 0, 7).toISOString();
+    render(
+      <HistoryView
+        repoPath="/test/repo"
+        history={history}
+        loading={false}
+        error=""
+        onMore={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    const time = screen.getByText("2026-12-30 13:00:07");
+    expect(time.tagName).toBe("TIME");
+    expect(time.getAttribute("datetime")).toBe(history.commits[0].date);
+  });
+
   it("restores visible rows and observes the new container after a failed refresh", () => {
     const props = {
       repoPath: "/test/repo",

@@ -98,3 +98,10 @@ cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D w
 - 首轮 Windows CI 暴露网络测试夹具的路径差异：`std::fs::canonicalize` 返回带 `\\?\` 前缀的路径，与应用保存的规范路径不一致，导致同步测试报告“仓库未添加到列表”。测试改用项目现有的 `dunce::canonicalize`，未修改网络传输实现；本地 4 项网络测试和 Rust 格式检查通过，最终两平台检查及打包结果以 Release 关联的 Actions 为准。
 - 后续 Windows 复测继续暴露克隆目标的同类问题：Git 在联网前无法写入带该前缀的目标目录。克隆父目录改用 `dunce::canonicalize`，保留规范化与已有目标拒绝检查，并在克隆地址 / 目标校验场景中断言返回的路径格式；网络代理场景继续验证克隆能到达预期代理端点。本地 5 项功能测试、4 项网络测试及 Rust 格式检查通过。
 - Windows 网络测试的本地 HTTP 服务还出现接受连接后读取返回 `WouldBlock` 的平台差异；两个测试服务在接受连接后显式恢复阻塞模式，再设置读取超时，避免继承监听 socket 的非阻塞状态。此调整仅涉及测试夹具。
+
+## 工具栏与提交时间调整（2026-10-24，本地试用版）
+
+- 按试用反馈恢复状态提示中的文字操作，处理建议 / 未提交文件与同步按钮靠右排列；移除容易被理解为保护模式的“安全同步”标签，保留底部规则说明。Fetch 全部移至同步全部左侧，所有 Fetch 入口统一使用云端获取图标。
+- 提交历史改为本地时区的 `YYYY-MM-DD HH:mm:ss`，加宽时间列并禁止折行。App 与 HistoryView 共 42 项相关测试、TypeScript / Vite 构建、变更代码 Prettier 与差异检查通过；新增完整时间显示测试，并在已有未提交文件交互测试中验证入口有可见文字。
+- macOS arm64 发布 `.app` 构建通过，本地 ad-hoc 签名并严格校验后更新 `/Applications/SourceNeo.app`。原生截图核对 Fetch 与同步全部的顺序、分叉仓库的处理建议文字与右侧排列，以及历史时间完整显示到秒。本轮只查看仓库，未执行 Fetch 或同步；仓库和网络配置保留。版本仍为 `0.1.3`，本次界面调整尚未提交或发布至 GitHub。
+- 替换前应用和配置已备份，安装清单位置见 `artifacts/latest-toolbar-time-preview.txt`。

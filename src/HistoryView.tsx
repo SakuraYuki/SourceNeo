@@ -13,6 +13,12 @@ const positions = new Map<string, { first: string; top: number }>();
 function refLabel(ref: string) {
   return ref.replace(/^refs\/(heads|remotes|tags)\//, "");
 }
+function commitTime(value: string) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value;
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
 export function HistoryView({
   repoPath,
   history,
@@ -57,6 +63,7 @@ export function HistoryView({
     return state.rows;
   }, [history]);
   const graphWidth = Math.max(64, ...rows.map((r) => r.width * 18 + 16));
+  const columns = `${graphWidth}px minmax(200px,1fr) 130px 156px`;
   const showRows = !error && rows.length > 0;
   useEffect(() => {
     if (!container.current) return;
@@ -105,13 +112,13 @@ export function HistoryView({
           <div
             className="history-columns"
             style={{
-              gridTemplateColumns: `${graphWidth}px minmax(200px,1fr) 130px 90px`,
+              gridTemplateColumns: columns,
             }}
           >
             <span>提交图</span>
             <span>提交 / 分支</span>
             <span>作者</span>
-            <span>日期</span>
+            <span title="按本地时区显示">提交时间</span>
           </div>
           <div
             className="history-scroll"
@@ -134,7 +141,7 @@ export function HistoryView({
               style={{
                 height: rows.length * ROW,
                 position: "relative",
-                minWidth: graphWidth + 470,
+                minWidth: graphWidth + 536,
               }}
             >
               {rows.slice(start, end).map((row, i) => (
@@ -143,7 +150,7 @@ export function HistoryView({
                   className={`commit-row ${selected?.hash === row.commit.hash ? "selected" : ""}`}
                   style={{
                     top: (start + i) * ROW,
-                    gridTemplateColumns: `${graphWidth}px minmax(200px,1fr) 130px 90px`,
+                    gridTemplateColumns: columns,
                   }}
                   onClick={() => setSelected(row.commit)}
                   title={`${row.commit.hash}\n父提交：${row.commit.parents.join(", ") || "无（根提交）"}\n${row.commit.subject}`}
@@ -189,9 +196,13 @@ export function HistoryView({
                     <code>{row.commit.hash.slice(0, 7)}</code>
                   </span>
                   <span className="muted ellipsis">{row.commit.author}</span>
-                  <span className="muted mono">
-                    {row.commit.date.slice(0, 10)}
-                  </span>
+                  <time
+                    className="muted mono commit-date"
+                    dateTime={row.commit.date}
+                    title="提交时间（本地时区）"
+                  >
+                    {commitTime(row.commit.date)}
+                  </time>
                 </button>
               ))}
             </div>

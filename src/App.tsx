@@ -31,12 +31,11 @@ import {
   MoreHorizontal,
   X,
   Terminal,
-  ShieldCheck,
   Sun,
   Moon,
   Columns2,
   Rows2,
-  Download,
+  CloudDownload,
   FolderInput,
   FolderOpen,
   GitCompareArrows,
@@ -540,7 +539,7 @@ export default function App() {
     return [
       {
         label: "Fetch 此仓库",
-        icon: Download,
+        icon: CloudDownload,
         disabled: operating,
         run: () => void runSync(target, true),
       },
@@ -764,10 +763,6 @@ export default function App() {
             disabled={!desktop}
             onClick={() => setAcquire("scan")}
           />
-          <span className="safety">
-            <ShieldCheck size={13} />
-            安全同步
-          </span>
           <IconButton
             label="网络设置"
             icon={Settings2}
@@ -786,6 +781,13 @@ export default function App() {
           >
             <RefreshCw size={16} className={refreshing ? "spin" : ""} />
           </button>
+          <IconButton
+            label="Fetch 全部"
+            icon={CloudDownload}
+            disabled={!repos.length || busy.size > 0 || batch?.running}
+            onClick={() => void runBatch(repoRef.current, true)}
+            title="Fetch 全部：仅获取远程对象和远程跟踪引用"
+          />
           <button
             className="primary"
             disabled={!repos.length || busy.size > 0 || batch?.running}
@@ -798,13 +800,6 @@ export default function App() {
             )}
             同步全部{repos.length > 0 && <kbd>{repos.length}</kbd>}
           </button>
-          <IconButton
-            label="Fetch 全部"
-            icon={Download}
-            disabled={!repos.length || busy.size > 0 || batch?.running}
-            onClick={() => void runBatch(repoRef.current, true)}
-            title="Fetch 全部：仅获取远程对象和远程跟踪引用"
-          />
         </div>
       </header>
       <section className="workspace-heading">
@@ -965,7 +960,7 @@ export default function App() {
                 </button>
                 <IconButton
                   label="Fetch 所选"
-                  icon={Download}
+                  icon={CloudDownload}
                   disabled={batch?.running}
                   onClick={() => void runBatch(checkedRepos, true)}
                 />
@@ -1278,7 +1273,7 @@ export default function App() {
               <div className="detail-actions">
                 <IconButton
                   label="Fetch 此仓库"
-                  icon={Download}
+                  icon={CloudDownload}
                   disabled={busy.has(repo.path)}
                   onClick={() => void runSync(repo, true)}
                 />
@@ -1322,14 +1317,16 @@ export default function App() {
                 <span>{attention(status, failures[selected]).reason}</span>
               </div>
               {isIssue(repo) && (
-                <IconButton
-                  label={status?.changed ? "查看未提交文件" : "查看处理建议"}
-                  icon={FileSearch}
+                <button
+                  className="text-btn"
                   onClick={() => {
                     setIssuesPath(selected);
                     setIssuesOpen(true);
                   }}
-                />
+                >
+                  <FileSearch size={13} aria-hidden="true" />
+                  {status?.changed ? "查看未提交文件" : "查看处理建议"}
+                </button>
               )}
               <button
                 className="text-btn"

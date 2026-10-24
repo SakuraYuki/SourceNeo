@@ -610,9 +610,11 @@ describe("repository dialogs", () => {
       { path: "src/changed.ts", oldPath: null, status: " M" },
     ]);
     render(<App />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: "查看未提交文件" }),
-    );
+    const action = await screen.findByRole("button", {
+      name: "查看未提交文件",
+    });
+    expect(action.textContent).toContain("查看未提交文件");
+    fireEvent.click(action);
     await screen.findByText("src/changed.ts");
     expect(screen.getByText("未暂存")).toBeTruthy();
     expect(api.workingChanges).toHaveBeenCalledExactlyOnceWith(repo.path);

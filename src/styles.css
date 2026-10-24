@@ -216,16 +216,6 @@ input::placeholder {
   color: var(--accent);
   margin-left: 4px;
 }
-.safety {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--muted);
-  font-size: 12px;
-}
-.safety svg {
-  color: var(--success);
-}
 .icon-btn {
   border: 0;
   background: transparent;
@@ -1249,6 +1239,8 @@ select {
   flex-shrink: 0;
 }
 .repo-summary > div {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1257,6 +1249,9 @@ select {
   line-height: 18px;
   overflow: auto;
   max-height: 70px;
+}
+.repo-summary > button {
+  flex-shrink: 0;
 }
 .summary-icon {
   display: flex;
@@ -1474,6 +1469,10 @@ select {
 }
 .commit-row > .muted {
   font-size: 12px;
+}
+.commit-date {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 .mono,
 code {
@@ -1895,9 +1894,6 @@ button.warning:hover:not(:disabled) {
   .app {
     padding: 0 10px;
   }
-  .safety {
-    display: none;
-  }
 }
 @media (max-width: 800px) {
   .graph-legend {
@@ -2167,9 +2163,6 @@ button.warning:hover:not(:disabled) {
   opacity: 0.65;
 }
 @media (max-width: 1040px) {
-  .header-actions .safety {
-    display: none;
-  }
   .graph-legend {
     display: none;
   }
