@@ -13,7 +13,7 @@ export function RepoCheckbox({
 }: {
   paths: string[];
   checked: Set<string>;
-  onToggle: (paths: string[]) => void;
+  onToggle: (paths: string[], shiftKey: boolean) => void;
   label: string;
 }) {
   const ref = useRef<HTMLInputElement>(null);
@@ -30,7 +30,9 @@ export function RepoCheckbox({
       aria-label={label}
       checked={paths.length > 0 && count === paths.length}
       disabled={!paths.length}
-      onChange={() => onToggle(paths)}
+      onChange={(e) =>
+        onToggle(paths, (e.nativeEvent as MouseEvent).shiftKey === true)
+      }
     />
   );
 }

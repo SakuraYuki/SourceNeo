@@ -63,7 +63,7 @@ export function CompareDialog({
     <Dialog label="与上游比较" onClose={onClose}>
       <div className="modal feature-modal wide-modal">
         <h2>与上游比较 · {repo.name}</h2>
-        <p>使用本地已知的上游引用，不自动联网。需要最新远端信息时先 Fetch。</p>
+        <p>使用本地已知的上游引用，不自动联网。需要最新远端信息时先 抓取。</p>
         {error ? (
           <p role="alert" className="error-text">
             {error}

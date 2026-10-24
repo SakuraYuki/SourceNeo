@@ -3,6 +3,8 @@ pub mod git;
 pub mod history;
 mod journal;
 pub mod model;
+#[cfg(any(test, all(feature = "desktop", target_os = "macos")))]
+mod native_menu;
 pub mod network;
 pub mod service;
 mod sync_policy;
@@ -30,6 +32,15 @@ mod desktop {
     pub async fn repo_groups(state: Backend<'_>) -> Result<Vec<RepoGroup>> {
         let s = state.inner().clone();
         blocking(move || Ok(s.groups())).await
+    }
+    #[tauri::command]
+    pub async fn update_repo_flags(
+        state: Backend<'_>,
+        path: String,
+        patch: RepoFlagsPatch,
+    ) -> Result<Repo> {
+        let s = state.inner().clone();
+        blocking(move || s.update_repo_flags(&path, patch)).await
     }
     #[tauri::command]
     pub async fn edit_repo_groups(state: Backend<'_>, edit: GroupEdit) -> Result<Vec<RepoGroup>> {
@@ -294,6 +305,8 @@ mod desktop {
                     .build(),
             )
             .setup(|app| {
+                #[cfg(target_os = "macos")]
+                super::native_menu::install(app)?;
                 let config_dir = app.path().app_config_dir()?;
                 #[cfg(debug_assertions)]
                 let config_dir = std::env::var_os("SOURCENEO_CONFIG_DIR")
@@ -315,6 +328,7 @@ mod desktop {
                 export_logs,
                 list_repos,
                 repo_groups,
+                update_repo_flags,
                 edit_repo_groups,
                 add_repo,
                 remove_repo,

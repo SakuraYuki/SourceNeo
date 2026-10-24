@@ -16,7 +16,7 @@ required-features = ["desktop"]
 
 [features]
 default = ["desktop"]
-desktop = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-clipboard-manager", "dep:tauri-plugin-single-instance", "dep:tauri-plugin-window-state"]
+desktop = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-clipboard-manager", "dep:tauri-plugin-single-instance", "dep:tauri-plugin-window-state", "dep:objc2-foundation"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -36,6 +36,8 @@ tauri-plugin-clipboard-manager = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }
 tauri-plugin-window-state = { version = "2.5", optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSLocale"], optional = true }
 
 [profile.release]
 codegen-units = 1

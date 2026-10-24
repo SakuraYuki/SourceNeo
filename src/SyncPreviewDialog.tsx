@@ -40,7 +40,7 @@ export function SyncPreviewDialog({
         <h2>同步前预览 · {repo.name}</h2>
         <p>
           预览不联网。实际同步会先
-          Fetch，再重新校验；远端更新、冲突或被忽略文件可能改变结果。
+          抓取，再重新校验；远端更新、冲突或被忽略文件可能改变结果。
         </p>
         {error ? (
           <p role="alert" className="error-text">
@@ -105,7 +105,12 @@ export function SyncPreviewDialog({
           />
           <button
             className="primary"
-            disabled={busy || !preview || preview.blockers.length > 0}
+            disabled={
+              busy ||
+              repo.syncDisabled ||
+              !preview ||
+              preview.blockers.length > 0
+            }
             onClick={onSync}
           >
             <RefreshCw size={14} />

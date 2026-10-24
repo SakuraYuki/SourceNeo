@@ -404,6 +404,8 @@ pub fn discover(path: &str) -> Result<Repo> {
             .to_string_lossy()
             .into_owned(),
         common_dir: common.to_string_lossy().into_owned(),
+        pinned: false,
+        sync_disabled: false,
     })
 }
 pub fn git_dir(repo: &Repo) -> Result<PathBuf> {

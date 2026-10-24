@@ -6,6 +6,17 @@ pub struct Repo {
     pub path: String,
     pub name: String,
     pub common_dir: String,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub sync_disabled: bool,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoFlagsPatch {
+    pub pinned: Option<bool>,
+    pub sync_disabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

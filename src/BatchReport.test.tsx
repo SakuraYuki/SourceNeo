@@ -42,12 +42,9 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-it("keeps the task entry present and opens on a new batch, without reopening on progress updates", () => {
+it("hides the empty task entry and opens on a new batch, without reopening on progress updates", () => {
   const { rerender } = render(report(null));
-  expect(
-    (screen.getByRole("button", { name: "任务状态" }) as HTMLButtonElement)
-      .disabled,
-  ).toBe(true);
+  expect(screen.queryByRole("button", { name: "任务状态" })).toBeNull();
   rerender(report(active));
   expect(screen.getByRole("region", { name: "批量任务状态" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "收起批量任务状态" }));
@@ -133,6 +130,19 @@ it("collapses five seconds after all success and preserves results when reopened
   expect(screen.getByText(/成功：已同步/)).toBeTruthy();
   act(() => vi.advanceTimersByTime(10000));
   expect(screen.getByRole("region", { name: "批量任务状态" })).toBeTruthy();
+});
+
+it("shows the operation and progress while running, then a compact completion label", () => {
+  const fetching = { ...active, label: "批量抓取", fetchOnly: true };
+  const { rerender } = render(report(fetching));
+  expect(screen.getByText("抓取 0/1")).toBeTruthy();
+  rerender(report({ ...done, label: "批量抓取", fetchOnly: true }));
+  expect(screen.getByText("抓取完成")).toBeTruthy();
+  expect(screen.queryByText("已完成 1/1")).toBeNull();
+  rerender(
+    report({ ...done, results: [{ repo, outcome: "error", message: "失败" }] }),
+  );
+  expect(screen.getByText("同步 1 项失败")).toBeTruthy();
 });
 
 it.each(["error", "attention", "skipped"] as const)(

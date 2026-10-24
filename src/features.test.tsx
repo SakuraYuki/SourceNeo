@@ -11,6 +11,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AcquireDialog } from "./AcquireDialog";
+import { OperationLogs } from "./OperationLogs";
 import { SyncPreviewDialog } from "./SyncPreviewDialog";
 import { HistorySearchDialog } from "./HistorySearchDialog";
 import { useBatchOperations } from "./hooks/useBatchOperations";
@@ -50,6 +51,41 @@ function deferred<T>() {
   });
   return { promise, resolve };
 }
+
+it("shows and searches legacy Fetch logs in Chinese without changing diagnostic paths", () => {
+  render(
+    <OperationLogs
+      repos={[repo]}
+      selected={repo.path}
+      logs={[
+        {
+          time: 1,
+          path: repo.path,
+          level: "info",
+          message: "开始Fetch",
+          operation: "Fetch",
+        },
+        {
+          time: 2,
+          path: repo.path,
+          level: "error",
+          message: "fatal: /test/Fetch/repo is unavailable",
+        },
+      ]}
+    />,
+  );
+  expect(screen.getByText("开始抓取")).toBeTruthy();
+  expect(
+    screen.getByText("fatal: /test/Fetch/repo is unavailable"),
+  ).toBeTruthy();
+  fireEvent.change(screen.getByRole("textbox", { name: "搜索日志" }), {
+    target: { value: "抓取" },
+  });
+  expect(screen.getByText("开始抓取")).toBeTruthy();
+  expect(
+    screen.queryByText("fatal: /test/Fetch/repo is unavailable"),
+  ).toBeNull();
+});
 
 it("clones once, waits for registration, and keeps errors in the dialog for correction", async () => {
   api.clone

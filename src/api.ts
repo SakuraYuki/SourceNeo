@@ -18,6 +18,7 @@ import type {
   SyncPreview,
   ScanResult,
   OperationProgress,
+  RepoFlagsPatch,
 } from "./types";
 export const desktop = isTauri();
 export const api = {
@@ -28,6 +29,8 @@ export const api = {
     desktop ? invoke<RepoGroup[]>("repo_groups") : Promise.resolve([]),
   editGroups: (edit: GroupEdit) =>
     invoke<RepoGroup[]>("edit_repo_groups", { edit }),
+  updateRepoFlags: (path: string, patch: RepoFlagsPatch) =>
+    invoke<Repo>("update_repo_flags", { path, patch }),
   add: (path: string) => invoke<Repo>("add_repo", { path }),
   remove: (path: string) => invoke<void>("remove_repo", { path }),
   status: (path: string) => invoke<RepoStatus>("repo_status", { path }),

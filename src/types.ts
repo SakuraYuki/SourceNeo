@@ -2,7 +2,10 @@ export interface Repo {
   path: string;
   name: string;
   commonDir: string;
+  pinned?: boolean;
+  syncDisabled?: boolean;
 }
+export type RepoFlagsPatch = Partial<Pick<Repo, "pinned" | "syncDisabled">>;
 export interface RepoGroup {
   name: string;
   paths: string[];

@@ -3377,6 +3377,7 @@ dependencies = [
  "dunce",
  "fs2",
  "libc",
+ "objc2-foundation",
  "regex",
  "serde",
  "serde_json",

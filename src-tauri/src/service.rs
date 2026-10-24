@@ -140,6 +140,45 @@ impl Service {
     pub fn groups(&self) -> Vec<RepoGroup> {
         self.saved.lock().unwrap().groups.clone()
     }
+    pub fn update_repo_flags(&self, path: &str, patch: RepoFlagsPatch) -> Result<Repo> {
+        // Serialize the mark with this repository's operations: once saving succeeds,
+        // even a sync that was queued earlier must observe the new prohibition.
+        self.with_repo(path, Access::ReadOnly, |_| {
+            let mut saved = self.saved.lock().unwrap();
+            let index = saved
+                .repos
+                .iter()
+                .position(|r| r.path == path)
+                .ok_or_else(|| GitError::new("path", "仓库已从列表移除"))?;
+            let old = saved.repos[index].clone();
+            if let Some(pinned) = patch.pinned {
+                saved.repos[index].pinned = pinned;
+            }
+            if let Some(disabled) = patch.sync_disabled {
+                saved.repos[index].sync_disabled = disabled;
+            }
+            if let Err(error) = self.persist(&saved) {
+                saved.repos[index] = old;
+                return Err(error);
+            }
+            Ok(saved.repos[index].clone())
+        })
+    }
+    fn ensure_sync_allowed(&self, path: &str) -> Result<()> {
+        let saved = self.saved.lock().unwrap();
+        let repo = saved
+            .repos
+            .iter()
+            .find(|r| r.path == path)
+            .ok_or_else(|| GitError::new("path", "仓库已从列表移除"))?;
+        if repo.sync_disabled {
+            return Err(GitError::new(
+                "syncDisabled",
+                "此仓库已禁止同步，仅允许抓取；如需同步，请先在仓库菜单中解除禁止",
+            ));
+        }
+        Ok(())
+    }
     pub fn edit_groups(&self, edit: GroupEdit) -> Result<Vec<RepoGroup>> {
         let mut saved = self.saved.lock().unwrap();
         let mut groups = saved.groups.clone();
@@ -384,7 +423,7 @@ impl Service {
     }
     pub fn fetch(&self, path: &str, remote: Option<&str>) -> Result<RepoStatus> {
         let result = self.with_repo(path, Access::Write, |repo| {
-            self.tracked(path, "Fetch", || {
+            self.tracked(path, "抓取", || {
                 git::check_locks(repo)?;
                 self.stage(path, "fetching");
                 git::fetch_with_network(repo, remote, &self.network_settings())?;
@@ -665,6 +704,9 @@ impl Service {
                 steps: vec!["获取远端并重新校验工作区、分支及同步策略".into()],
                 blockers: vec![],
             };
+            if let Err(error) = self.ensure_sync_allowed(path) {
+                preview.blockers.push(error.message);
+            }
             let s = &preview.status;
             if let Err(e) = git::check_locks(repo) {
                 preview.blockers.push(e.message);
@@ -1041,6 +1083,7 @@ impl Service {
         self.log(path, "info", "开始同步");
         self.errors.lock().unwrap().remove(path);
         let result = self.with_repo(path, Access::Write, |repo| {
+            self.ensure_sync_allowed(path)?;
             self.tracked(path, "同步", || self.sync_inner(repo))
         });
         if let Err(e) = &result {

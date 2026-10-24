@@ -9,7 +9,7 @@ import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
 import { useRepositoryHistory } from "./hooks/useRepositoryHistory";
 import { useBatchOperations } from "./hooks/useBatchOperations";
 import { useOperationProgress } from "./hooks/useOperationProgress";
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   ArrowDown,
@@ -36,6 +36,10 @@ import {
   Columns2,
   Rows2,
   CloudDownload,
+  Pin,
+  PinOff,
+  LockKeyhole,
+  LockKeyholeOpen,
   FolderInput,
   FolderOpen,
   GitCompareArrows,
@@ -53,6 +57,7 @@ import {
   errorText,
   type LogEntry,
   type Repo,
+  type RepoFlagsPatch,
   type RepoStatus,
   type RepoGroup,
   type GroupEdit,
@@ -132,6 +137,13 @@ export default function App() {
   const [groupsOpen, setGroupsOpen] = useState(false);
   const [movePaths, setMovePaths] = useState<string[] | null>(null);
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  const checkAnchor = useRef<{ path: string; section: string } | null>(null);
+  const flagsSaving = useRef(new Set<string>());
+  const flagsRevision = useRef(0);
+  const savedFlags = useRef(
+    new Map<string, { revision: number; flags: RepoFlagsPatch }>(),
+  );
+  const [flagsBusy, setFlagsBusy] = useState<Set<string>>(new Set());
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const groupGuard = useRef(false);
   const groupRevision = useRef(0);
@@ -231,9 +243,20 @@ export default function App() {
   const reloadRepos = useCallback(async () => {
     const id = ++repoListRequest.current;
     const revision = groupRevision.current;
+    const flagsAtStart = flagsRevision.current;
     try {
-      const [list, savedGroups] = await Promise.all([api.list(), api.groups()]);
+      const [snapshot, savedGroups] = await Promise.all([
+        api.list(),
+        api.groups(),
+      ]);
       if (!mounted.current || id !== repoListRequest.current) return null;
+      // Keep membership from the list, but do not roll back marks saved while it loaded.
+      const list = snapshot.map((r) => {
+        const saved = savedFlags.current.get(r.path);
+        return saved && saved.revision > flagsAtStart
+          ? { ...r, ...saved.flags }
+          : r;
+      });
       repoRef.current = list;
       setRepos(list);
       if (revision === groupRevision.current) setGroups(savedGroups);
@@ -263,6 +286,7 @@ export default function App() {
     }
   }
   function toggleChecked(paths: string[]) {
+    checkAnchor.current = null;
     setChecked((old) => {
       const next = new Set(old);
       const all = paths.every((p) => old.has(p));
@@ -309,6 +333,18 @@ export default function App() {
       if (!reserved) busyRef.current.add(repo.path);
       setBusy(new Set(busyRef.current));
       try {
+        const current = repoRef.current.find((r) => r.path === repo.path);
+        if (
+          !fetchOnly &&
+          (current?.syncDisabled || flagsSaving.current.has(repo.path))
+        )
+          return {
+            repo,
+            outcome: "skipped",
+            message: current?.syncDisabled
+              ? "已禁止同步，仍可抓取"
+              : "仓库标记正在保存，请稍后重试",
+          };
         const s = fetchOnly
           ? await api.fetch(repo.path, remote)
           : await api.sync(repo.path);
@@ -534,11 +570,36 @@ export default function App() {
       if (mounted.current) setOpeningTools(new Set(toolBusy.current));
     }
   }
+  async function updateRepoFlags(target: Repo, patch: RepoFlagsPatch) {
+    if (flagsSaving.current.has(target.path)) return;
+    flagsSaving.current.add(target.path);
+    setFlagsBusy(new Set(flagsSaving.current));
+    try {
+      const updated = await api.updateRepoFlags(target.path, patch);
+      if (!mounted.current) return;
+      savedFlags.current.set(updated.path, {
+        revision: ++flagsRevision.current,
+        flags: { pinned: updated.pinned, syncDisabled: updated.syncDisabled },
+      });
+      const next = repoRef.current.map((r) =>
+        r.path === updated.path ? updated : r,
+      );
+      repoRef.current = next;
+      setRepos(next);
+    } catch (e) {
+      if (mounted.current)
+        setNotice(`${target.name}：保存仓库标记失败：${errorText(e)}`);
+    } finally {
+      flagsSaving.current.delete(target.path);
+      if (mounted.current) setFlagsBusy(new Set(flagsSaving.current));
+    }
+  }
   function menuActions(target: Repo): MenuAction[] {
+    target = repos.find((r) => r.path === target.path) ?? target;
     const operating = busy.has(target.path);
     return [
       {
-        label: "Fetch 此仓库",
+        label: "抓取此仓库",
         icon: CloudDownload,
         disabled: operating,
         run: () => void runSync(target, true),
@@ -552,7 +613,8 @@ export default function App() {
       {
         label: "同步此仓库",
         icon: RefreshCw,
-        disabled: operating,
+        disabled:
+          operating || target.syncDisabled || flagsBusy.has(target.path),
         run: () => void runSync(target),
       },
       {
@@ -584,6 +646,20 @@ export default function App() {
           setIssuesPath(target.path);
           setIssuesOpen(true);
         },
+      },
+      {
+        label: target.pinned ? "取消置顶" : "置顶仓库",
+        icon: target.pinned ? PinOff : Pin,
+        separator: true,
+        disabled: operating || flagsBusy.has(target.path),
+        run: () => void updateRepoFlags(target, { pinned: !target.pinned }),
+      },
+      {
+        label: target.syncDisabled ? "允许同步" : "禁止同步（仍可抓取）",
+        icon: target.syncDisabled ? LockKeyholeOpen : LockKeyhole,
+        disabled: operating || flagsBusy.has(target.path),
+        run: () =>
+          void updateRepoFlags(target, { syncDisabled: !target.syncDisabled }),
       },
       {
         label: "在终端打开",
@@ -657,21 +733,63 @@ export default function App() {
       `${r.name} ${r.path}`.toLowerCase().includes(query.toLowerCase()),
   );
   const groupedPaths = new Set(groups.flatMap((g) => g.paths));
+  const showGroups = groups.length > 0 || repos.some((r) => r.pinned);
+  const pinned = visible.filter((r) => r.pinned);
+  const pinFirst = (list: Repo[]) =>
+    [...list].sort(
+      (a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)),
+    );
   const sections = [
+    ...(pinned.length
+      ? [{ key: "pinned", name: "置顶", repos: pinned, automatic: true }]
+      : []),
     ...groups.map((g) => ({
-      key: g.name,
+      key: `group:${g.name}`,
       name: g.name,
-      repos: visible.filter((r) => g.paths.includes(r.path)),
+      repos: pinFirst(visible.filter((r) => g.paths.includes(r.path))),
+      automatic: false,
     })),
     {
-      key: "",
+      key: "ungrouped",
       name: "未分组",
-      repos: visible.filter((r) => !groupedPaths.has(r.path)),
+      repos: pinFirst(visible.filter((r) => !groupedPaths.has(r.path))),
+      automatic: false,
     },
   ].filter((g) => g.repos.length || (groups.length > 0 && !query && !filter));
-  const expanded = sections.flatMap((g) =>
-    groups.length > 0 && collapsed.has(g.key) ? [] : g.repos,
+  const expandedRows = sections.flatMap((g) =>
+    showGroups && collapsed.has(g.key)
+      ? []
+      : g.repos.map((r) => ({ repo: r, section: g.key })),
   );
+  const expanded = [
+    ...new Map(expandedRows.map(({ repo }) => [repo.path, repo])).values(),
+  ];
+  function toggleRepoChecked(path: string, shiftKey: boolean, section: string) {
+    const anchorIndex = expandedRows.findIndex(
+      (r) =>
+        r.repo.path === checkAnchor.current?.path &&
+        r.section === checkAnchor.current.section,
+    );
+    const targetIndex = expandedRows.findIndex(
+      (r) => r.repo.path === path && r.section === section,
+    );
+    const paths =
+      shiftKey && anchorIndex >= 0 && targetIndex >= 0
+        ? expandedRows
+            .slice(
+              Math.min(anchorIndex, targetIndex),
+              Math.max(anchorIndex, targetIndex) + 1,
+            )
+            .map((r) => r.repo.path)
+        : [path];
+    if (!shiftKey || anchorIndex < 0) checkAnchor.current = { path, section };
+    setChecked((old) => {
+      const next = new Set(old);
+      const uncheck = old.has(path);
+      paths.forEach((p) => (uncheck ? next.delete(p) : next.add(p)));
+      return next;
+    });
+  }
   const checkedRepos = repos.filter((r) => checked.has(r.path));
   const hiddenCheckedCount = checkedRepos.filter(
     (r) => !expanded.some((v) => v.path === r.path),
@@ -684,8 +802,8 @@ export default function App() {
       maximumPanelHeight,
       repos.length
         ? 114 +
-            (groups.length ? sections.length * 30 : 0) +
-            Math.max(expanded.length, 1) * REPO_ROW_HEIGHT
+            (showGroups ? sections.length * 30 : 0) +
+            Math.max(expandedRows.length, 1) * REPO_ROW_HEIGHT
         : 180,
     ),
   );
@@ -719,13 +837,32 @@ export default function App() {
   return (
     <main className="app">
       <header className="app-header">
-        <div className="brand">
-          <div className="brand-mark">
-            <GitBranch size={18} />
-          </div>
-          <strong>
-            Source<span>Neo</span>
-          </strong>
+        <div className="overview-stats">
+          <span>
+            <i className="dot synced" />
+            {syncedCount} 已同步
+          </span>
+          <button
+            className="attention-overview"
+            title="查看具体原因和未提交文件"
+            aria-haspopup="dialog"
+            disabled={issueCount === 0}
+            aria-label={`查看 ${issueCount} 个需关注仓库`}
+            onClick={() => {
+              setIssuesPath(undefined);
+              setIssuesOpen(true);
+            }}
+          >
+            <i className="dot attention" />
+            {issueCount} 需关注
+            <ChevronDown size={12} />
+          </button>
+          <BatchReport
+            batch={batch}
+            onStop={stopBatch}
+            onRetry={retryFailed}
+            progress={progress}
+          />
         </div>
         <div className="header-actions">
           <button
@@ -782,11 +919,11 @@ export default function App() {
             <RefreshCw size={16} className={refreshing ? "spin" : ""} />
           </button>
           <IconButton
-            label="Fetch 全部"
+            label="抓取全部"
             icon={CloudDownload}
             disabled={!repos.length || busy.size > 0 || batch?.running}
             onClick={() => void runBatch(repoRef.current, true)}
-            title="Fetch 全部：仅获取远程对象和远程跟踪引用"
+            title="抓取全部：仅获取远程对象和远程跟踪引用"
           />
           <button
             className="primary"
@@ -802,39 +939,7 @@ export default function App() {
           </button>
         </div>
       </header>
-      <section className="workspace-heading">
-        <div>
-          <h1>仓库总览</h1>
-        </div>
-        <div className="overview-stats">
-          <span>
-            <i className="dot synced" />
-            {syncedCount} 已同步
-          </span>
-          <button
-            className="attention-overview"
-            title="查看具体原因和未提交文件"
-            aria-haspopup="dialog"
-            disabled={issueCount === 0}
-            aria-label={`查看 ${issueCount} 个需关注仓库`}
-            onClick={() => {
-              setIssuesPath(undefined);
-              setIssuesOpen(true);
-            }}
-          >
-            <i className="dot attention" />
-            {issueCount} 需关注
-            <ChevronDown size={12} />
-          </button>
-          <span className="muted">{repos.length} 个仓库</span>
-          <BatchReport
-            batch={batch}
-            onStop={stopBatch}
-            onRetry={retryFailed}
-            progress={progress}
-          />
-        </div>
-      </section>
+
       {!desktop && (
         <div className="preview-banner">
           <CircleAlert size={14} />
@@ -949,7 +1054,10 @@ export default function App() {
                 <IconButton
                   label="清空选择"
                   icon={ListX}
-                  onClick={() => setChecked(new Set())}
+                  onClick={() => {
+                    checkAnchor.current = null;
+                    setChecked(new Set());
+                  }}
                 />
                 <button
                   disabled={batch?.running}
@@ -959,7 +1067,7 @@ export default function App() {
                   同步所选
                 </button>
                 <IconButton
-                  label="Fetch 所选"
+                  label="抓取所选"
                   icon={CloudDownload}
                   disabled={batch?.running}
                   onClick={() => void runBatch(checkedRepos, true)}
@@ -1011,14 +1119,24 @@ export default function App() {
               </div>
             ) : (
               sections.map((section) => (
-                <Fragment key={section.key}>
-                  {groups.length > 0 && (
+                <div
+                  key={section.key}
+                  role="group"
+                  aria-label={
+                    section.automatic ? "置顶仓库" : `仓库分组 ${section.name}`
+                  }
+                >
+                  {showGroups && (
                     <div className="repo-group-heading">
                       <RepoCheckbox
                         paths={section.repos.map((r) => r.path)}
                         checked={checked}
                         onToggle={toggleChecked}
-                        label={`选择分组 ${section.name} 中的仓库`}
+                        label={
+                          section.automatic
+                            ? "选择置顶仓库"
+                            : `选择分组 ${section.name} 中的仓库`
+                        }
                       />
                       <button
                         className="text-btn"
@@ -1039,12 +1157,15 @@ export default function App() {
                         ) : (
                           <ChevronDown size={13} />
                         )}
+                        {section.automatic && (
+                          <Pin size={12} aria-hidden="true" />
+                        )}
                         <strong>{section.name}</strong>
                         <span className="count">{section.repos.length}</span>
                       </button>
                     </div>
                   )}
-                  {(!groups.length || !collapsed.has(section.key)
+                  {(!showGroups || !collapsed.has(section.key)
                     ? section.repos
                     : []
                   ).map((r) => {
@@ -1078,19 +1199,62 @@ export default function App() {
                         <RepoCheckbox
                           paths={[r.path]}
                           checked={checked}
-                          onToggle={toggleChecked}
+                          onToggle={(_, shiftKey) =>
+                            toggleRepoChecked(r.path, shiftKey, section.key)
+                          }
                           label={`选择仓库 ${r.name}`}
                         />
                         <button
                           className="repo-select"
-                          onClick={() => setSelected(r.path)}
-                          aria-label={`查看仓库 ${r.name}，分支 ${s?.branch ?? "读取中"}，${info.label}，${s?.changed ?? 0} 个未提交改动，待推送 ${s?.ahead ?? 0}，待拉取 ${s?.behind ?? 0}`}
+                          onClick={(e) => {
+                            e.currentTarget.focus();
+                            setSelected(r.path);
+                            if (e.shiftKey)
+                              toggleRepoChecked(r.path, true, section.key);
+                            else
+                              checkAnchor.current = {
+                                path: r.path,
+                                section: section.key,
+                              };
+                          }}
+                          onKeyDown={(e) => {
+                            if (
+                              e.key === " " &&
+                              !e.altKey &&
+                              !e.ctrlKey &&
+                              !e.metaKey
+                            ) {
+                              e.preventDefault();
+                              if (!e.repeat)
+                                toggleRepoChecked(
+                                  r.path,
+                                  e.shiftKey,
+                                  section.key,
+                                );
+                            }
+                          }}
+                          aria-keyshortcuts="Space Shift+Space"
+                          aria-label={`查看仓库 ${r.name}，分支 ${s?.branch ?? "读取中"}，${info.label}，${s?.changed ?? 0} 个未提交改动，待推送 ${s?.ahead ?? 0}，待拉取 ${s?.behind ?? 0}${r.pinned ? "，已置顶" : ""}${r.syncDisabled ? "，禁止同步，仍可抓取" : ""}`}
                           aria-pressed={r.path === selected}
                           title={`${r.path}\n分支：${s?.branch ?? "读取中"}\n${failed || s?.message || "正在读取状态"}\n远程更新：${s?.lastFetched ? new Date(s.lastFetched * 1000).toLocaleString("zh-CN") : "尚未获取"}`}
                         >
                           <span className="repo-name" title={r.path}>
                             <FolderGit2 size={17} />
                             <strong>{r.name}</strong>
+                            {r.pinned && (
+                              <Pin
+                                size={12}
+                                className="repo-mark"
+                                aria-label="已置顶"
+                              />
+                            )}
+                            {r.syncDisabled && (
+                              <LockKeyhole
+                                size={12}
+                                className="repo-mark sync-disabled-mark"
+                                aria-label="禁止同步，仍可抓取"
+                              />
+                            )}
                             {repos.some(
                               (other) =>
                                 other.path !== r.path &&
@@ -1166,9 +1330,15 @@ export default function App() {
                         <div className="repo-row-actions">
                           <button
                             className="icon-btn"
-                            title={`同步 ${r.name}`}
                             aria-label={`同步 ${r.name}`}
-                            disabled={loading}
+                            disabled={
+                              loading || r.syncDisabled || flagsBusy.has(r.path)
+                            }
+                            title={
+                              r.syncDisabled
+                                ? "已禁止同步，仍可抓取"
+                                : `同步 ${r.name}`
+                            }
                             onClick={() => void runSync(r)}
                           >
                             <RefreshCw
@@ -1194,7 +1364,7 @@ export default function App() {
                       </div>
                     );
                   })}
-                </Fragment>
+                </div>
               ))
             )}
           </div>
@@ -1272,7 +1442,7 @@ export default function App() {
             {repo && (
               <div className="detail-actions">
                 <IconButton
-                  label="Fetch 此仓库"
+                  label="抓取此仓库"
                   icon={CloudDownload}
                   disabled={busy.has(repo.path)}
                   onClick={() => void runSync(repo, true)}
@@ -1305,6 +1475,12 @@ export default function App() {
               className={`repo-summary ${failures[selected] ? "error" : (status?.kind ?? "")}`}
             >
               <div>
+                {repo.syncDisabled && (
+                  <span className="sync-disabled-label">
+                    <LockKeyhole size={13} />
+                    禁止同步 · 可抓取
+                  </span>
+                )}
                 <span className="summary-icon">
                   {status ? (
                     <StatusIcon
@@ -1330,7 +1506,16 @@ export default function App() {
               )}
               <button
                 className="text-btn"
-                disabled={busy.has(selected)}
+                disabled={
+                  busy.has(selected) ||
+                  repo.syncDisabled ||
+                  flagsBusy.has(selected)
+                }
+                title={
+                  repo.syncDisabled
+                    ? "已禁止同步，请先在仓库菜单中允许同步"
+                    : undefined
+                }
                 onClick={() => void runSync(repo)}
               >
                 {busy.has(selected) ? (
@@ -1472,7 +1657,7 @@ export default function App() {
       )}
       {previewRepo && (
         <SyncPreviewDialog
-          repo={previewRepo}
+          repo={repos.find((r) => r.path === previewRepo.path) ?? previewRepo}
           busy={busy.has(previewRepo.path)}
           onClose={() => setPreviewRepo(null)}
           onSync={() => {

@@ -276,7 +276,7 @@ export function NetworkSettingsDialog({ onClose }: { onClose: () => void }) {
                       ? "直连规则优先，其余地址使用代理"
                       : "当前沿用已有网络配置"}
                   </strong>
-                  <span>适用于 Fetch、同步和克隆。SSH 仓库沿用 SSH 配置。</span>
+                  <span>适用于 抓取、同步和克隆。SSH 仓库沿用 SSH 配置。</span>
                 </div>
               </div>
             </>

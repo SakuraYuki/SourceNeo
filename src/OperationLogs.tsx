@@ -2,8 +2,10 @@ import { useState } from "react";
 import { api } from "./api";
 import { errorText, type LogEntry, type Repo } from "./types";
 import { stageLabels } from "./hooks/useOperationProgress";
-import { Download } from "lucide-react";
+import { ChevronDown, Download } from "lucide-react";
 import { IconButton } from "./IconButton";
+const logText = (text: string) =>
+  text.replace(/^(开始)?Fetch(?=已结束|失败|$)/, "$1抓取");
 export function OperationLogs({
   logs,
   repos,
@@ -20,26 +22,29 @@ export function OperationLogs({
   const visible = logs.filter(
     (l) =>
       (!path || l.path === path || !l.path) &&
-      `${l.message} ${l.operation ?? ""} ${l.path}`
+      `${logText(l.message)} ${logText(l.operation ?? "")} ${l.path}`
         .toLowerCase()
         .includes(query.toLowerCase()),
   );
   return (
     <div className="operation-logs">
       <div className="log-tools">
-        <select
-          aria-label="日志仓库筛选"
-          value={scope}
-          onChange={(e) => setScope(e.target.value)}
-        >
-          <option value="current">当前仓库</option>
-          <option value="all">全部仓库（含已移除）</option>
-          {repos.map((r) => (
-            <option key={r.path} value={r.path}>
-              {r.name}
-            </option>
-          ))}
-        </select>
+        <div className="log-scope">
+          <select
+            aria-label="日志仓库筛选"
+            value={scope}
+            onChange={(e) => setScope(e.target.value)}
+          >
+            <option value="current">当前仓库</option>
+            <option value="all">全部仓库（含已移除）</option>
+            {repos.map((r) => (
+              <option key={r.path} value={r.path}>
+                {r.name}
+              </option>
+            ))}
+          </select>
+          <ChevronDown size={13} aria-hidden="true" />
+        </div>
         <input
           aria-label="搜索日志"
           placeholder="搜索操作或错误"
@@ -82,7 +87,7 @@ export function OperationLogs({
                   {repos.find((r) => r.path === l.path)?.name ?? l.path} ·{" "}
                 </strong>
               )}
-              {l.message}
+              {logText(l.message)}
               {l.stage && (
                 <small>
                   {" "}

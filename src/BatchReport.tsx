@@ -1,6 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
 import {
-  Activity,
   AlertCircle,
   Check,
   CheckCircle2,
@@ -121,6 +120,18 @@ export function BatchReport({
   const percentage = batch?.total
     ? Math.round((batch.results.length / batch.total) * 100)
     : 0;
+  if (!batch) return null;
+  const operation = batch.fetchOnly ? "抓取" : "同步";
+  const count = (key: string) => counts.find((item) => item.key === key)!.count;
+  const summary = running
+    ? `${operation} ${batch.results.length}/${batch.total}`
+    : succeeded
+      ? `${operation}完成`
+      : count("error")
+        ? `${operation} ${count("error")} 项失败`
+        : count("attention")
+          ? `${operation} ${count("attention")} 项需处理`
+          : `${operation} ${count("skipped")} 项跳过`;
   return (
     <div className="batch-status" ref={root}>
       <button
@@ -129,6 +140,7 @@ export function BatchReport({
         disabled={!batch}
         aria-expanded={expanded}
         aria-controls={panelId}
+        title={`${batch.label}：已完成 ${batch.results.length}/${batch.total}，点击查看详情`}
         aria-label={
           batch
             ? `${batch.label}${running ? "进行中" : "结果"}，${batch.results.length}/${batch.total}，${expanded ? "收起" : "展开"}`
@@ -140,16 +152,10 @@ export function BatchReport({
           <LoaderCircle size={13} className="spin" />
         ) : succeeded ? (
           <CheckCircle2 size={13} />
-        ) : batch ? (
-          <AlertCircle size={13} />
         ) : (
-          <Activity size={13} />
+          <AlertCircle size={13} />
         )}
-        <span>
-          {batch
-            ? `${running ? "进行中" : succeeded ? "已完成" : "需关注"} ${batch.results.length}/${batch.total}`
-            : "任务状态"}
-        </span>
+        <span>{summary}</span>
         {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
       </button>
       {batch && expanded && (

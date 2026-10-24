@@ -19,13 +19,21 @@ export function useBatchOperations(
   const guard = useRef(false),
     stopped = useRef(false);
   async function runBatch(targets: Repo[], fetchOnly = false) {
+    targets = [...new Map(targets.map((r) => [r.path, r])).values()];
     if (guard.current || !targets.length) return;
     guard.current = true;
     stopped.current = false;
     const queued: Repo[] = [],
       results: BatchResult[] = [];
     for (const target of targets) {
-      if (busy.current.has(target.path))
+      const current = repos.current.find((r) => r.path === target.path);
+      if (!fetchOnly && current?.syncDisabled)
+        results.push({
+          repo: current,
+          outcome: "skipped",
+          message: "已禁止同步，仍可抓取",
+        });
+      else if (busy.current.has(target.path))
         results.push({
           repo: target,
           outcome: "skipped",
@@ -38,7 +46,7 @@ export function useBatchOperations(
     }
     setBusy(new Set(busy.current));
     setBatch({
-      label: fetchOnly ? "批量 Fetch" : "批量同步",
+      label: fetchOnly ? "批量抓取" : "批量同步",
       total: targets.length,
       running: true,
       results,

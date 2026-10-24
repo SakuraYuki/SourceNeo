@@ -11,13 +11,14 @@ import {
 } from "@testing-library/react";
 import App from "./App";
 import { installDomMocks, makeHistory, repo, status } from "./test/fixtures";
-import type { History, RepoStatus } from "./types";
+import type { History, Repo, RepoStatus } from "./types";
 
 const api = vi.hoisted(() => ({
   theme: vi.fn(),
   list: vi.fn(),
   groups: vi.fn(),
   editGroups: vi.fn(),
+  updateRepoFlags: vi.fn(),
   add: vi.fn(),
   remove: vi.fn(),
   status: vi.fn(),
@@ -33,6 +34,7 @@ const api = vi.hoisted(() => ({
   workingChanges: vi.fn(),
   logs: vi.fn(),
   diagnostic: vi.fn(),
+  preview: vi.fn(),
   copy: vi.fn(),
   pick: vi.fn(),
 }));
@@ -63,6 +65,13 @@ beforeEach(() => {
     makeHistory(count),
   );
   api.sync.mockResolvedValue(status);
+  api.preview.mockResolvedValue({
+    status,
+    remote: "origin",
+    policy: "ff",
+    steps: [],
+    blockers: [],
+  });
   api.logs.mockResolvedValue([]);
   api.branches.mockResolvedValue([
     {
@@ -158,6 +167,325 @@ describe("repository groups and bulk actions", () => {
     commonDir: "/test/third/.git",
   };
 
+  function checkbox(name: string) {
+    return screen.getByRole("checkbox", {
+      name: `选择仓库 ${name}`,
+    }) as HTMLInputElement;
+  }
+  function row(name: string) {
+    return screen.getByRole("button", {
+      name: new RegExp(`^查看仓库 ${name}，`),
+    });
+  }
+
+  function flagStore(initial: Repo[]) {
+    let saved = initial;
+    api.list.mockImplementation(async () => saved);
+    api.updateRepoFlags.mockImplementation(async (path: string, patch) => {
+      saved = saved.map((r) => (r.path === path ? { ...r, ...patch } : r));
+      return saved.find((r) => r.path === path)!;
+    });
+  }
+
+  it("pins inside the original group and automatic group, shares checks and runs each repository once", async () => {
+    flagStore([repo, other, third]);
+    api.groups.mockResolvedValue([
+      { name: "工作", paths: [repo.path, other.path] },
+    ]);
+    api.fetch.mockImplementation(async (path: string) => ({ ...status, path }));
+    const view = render(<App />);
+    await screen.findByText("100+");
+    menuAction("置顶仓库", other.name);
+    const pinned = await screen.findByRole("group", { name: "置顶仓库" });
+    const original = screen.getByRole("group", { name: "仓库分组 工作" });
+    expect(
+      within(original)
+        .getAllByRole("checkbox")
+        .slice(1)
+        .map((x) => x.getAttribute("aria-label")),
+    ).toEqual(["选择仓库 other", `选择仓库 ${repo.name}`]);
+    fireEvent.click(
+      within(pinned).getByRole("checkbox", { name: "选择仓库 other" }),
+    );
+    expect(
+      (
+        within(original).getByRole("checkbox", {
+          name: "选择仓库 other",
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+    expect(screen.getByText("已选 1 个")).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: "全选当前可见仓库" }));
+    expect(screen.getByText("已选 3 个")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "抓取所选" }));
+    await screen.findByText(/批量抓取完成 · 3\/3 · 3 成功/);
+    expect(api.fetch.mock.calls.map((c) => c[0]).sort()).toEqual(
+      [repo.path, other.path, third.path].sort(),
+    );
+    expect(api.editGroups).not.toHaveBeenCalled();
+    view.unmount();
+    render(<App />);
+    const restored = await screen.findByRole("group", { name: "置顶仓库" });
+    fireEvent.click(
+      within(restored).getByRole("button", { name: "更多操作 other" }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "取消置顶" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("group", { name: "置顶仓库" })).toBeNull(),
+    );
+    expect(api.updateRepoFlags).toHaveBeenLastCalledWith(other.path, {
+      pinned: false,
+    });
+    expect(
+      within(screen.getByRole("group", { name: "仓库分组 工作" }))
+        .getAllByRole("checkbox")
+        .slice(1)
+        .map((x) => x.getAttribute("aria-label")),
+    ).toEqual([`选择仓库 ${repo.name}`, "选择仓库 other"]);
+  });
+
+  it("keeps Shift anchors tied to a displayed occurrence when pinned repositories appear twice", async () => {
+    flagStore([repo, { ...other, pinned: true }, { ...third, pinned: true }]);
+    api.groups.mockResolvedValue([
+      { name: "工作", paths: [repo.path, other.path] },
+    ]);
+    render(<App />);
+    await screen.findByText("100+");
+    const original = screen.getByRole("group", { name: "仓库分组 工作" });
+    fireEvent.click(
+      within(original).getByRole("button", { name: /^查看仓库 other，/ }),
+    );
+    fireEvent.click(
+      within(original).getByRole("checkbox", { name: `选择仓库 ${repo.name}` }),
+      { shiftKey: true },
+    );
+    expect(screen.getByText("已选 2 个")).toBeTruthy();
+    expect(
+      screen
+        .getAllByRole("checkbox", { name: "选择仓库 third" })
+        .every((x) => !(x as HTMLInputElement).checked),
+    ).toBe(true);
+    expect(
+      screen
+        .getAllByRole("checkbox", { name: "选择仓库 other" })
+        .every((x) => (x as HTMLInputElement).checked),
+    ).toBe(true);
+  });
+
+  it("blocks every sync entry and reports batch skips while allowing fetch, then allows sync after unmarking", async () => {
+    flagStore([{ ...repo, syncDisabled: true }, other]);
+    api.sync.mockImplementation(async (path: string) => ({ ...status, path }));
+    api.fetch.mockImplementation(async (path: string) => ({ ...status, path }));
+    render(<App />);
+    await screen.findByText("100+");
+    expect(
+      (
+        screen.getByRole("button", {
+          name: `同步 ${repo.name}`,
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "同步此仓库" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    fireEvent.click(
+      screen.getByRole("button", { name: `更多操作 ${repo.name}` }),
+    );
+    expect(
+      (
+        screen.getByRole("menuitem", {
+          name: "同步此仓库",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "同步预览" }));
+    await screen.findByText("有效策略");
+    expect(
+      (screen.getByRole("button", { name: "执行同步" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    fireEvent.click(screen.getByRole("button", { name: /^同步全部/ }));
+    await screen.findByText(/批量同步完成 · 2\/2 · 1 成功 · 1 跳过/);
+    expect(api.sync.mock.calls.map((c) => c[0])).toEqual([other.path]);
+    expect(screen.getByText(/已禁止同步，仍可抓取/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: "全选当前可见仓库" }));
+    fireEvent.click(screen.getByRole("button", { name: "同步所选" }));
+    await waitFor(() => expect(api.sync).toHaveBeenCalledTimes(2));
+    await screen.findByText(/批量同步完成 · 2\/2 · 1 成功 · 1 跳过/);
+    fireEvent.click(screen.getByRole("button", { name: "抓取全部" }));
+    await screen.findByText(/批量抓取完成 · 2\/2 · 2 成功/);
+    expect(api.fetch.mock.calls.map((c) => c[0]).sort()).toEqual(
+      [repo.path, other.path].sort(),
+    );
+    menuAction("允许同步");
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByRole("button", {
+            name: "同步此仓库",
+          }) as HTMLButtonElement
+        ).disabled,
+      ).toBe(false),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "同步此仓库" }));
+    await waitFor(() => expect(api.sync).toHaveBeenLastCalledWith(repo.path));
+  });
+
+  it("preserves marks on save failure and applies disabling only after a successful save", async () => {
+    flagStore([repo]);
+    render(<App />);
+    await screen.findByText("100+");
+    api.updateRepoFlags.mockRejectedValueOnce(new Error("磁盘已满"));
+    menuAction("禁止同步（仍可抓取）");
+    await screen.findByText(/保存仓库标记失败：磁盘已满/);
+    expect(
+      (screen.getByRole("button", { name: "同步此仓库" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+    menuAction("禁止同步（仍可抓取）");
+    await screen.findByText("禁止同步 · 可抓取");
+    expect(
+      (screen.getByRole("button", { name: "同步此仓库" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(api.updateRepoFlags).toHaveBeenLastCalledWith(repo.path, {
+      syncDisabled: true,
+    });
+  });
+
+  it("does not start a batch sync while the prohibition is being saved", async () => {
+    flagStore([repo]);
+    render(<App />);
+    await screen.findByText("100+");
+    const pending = deferred<Repo>();
+    api.updateRepoFlags.mockReturnValueOnce(pending.promise);
+    menuAction("禁止同步（仍可抓取）");
+    fireEvent.click(screen.getByRole("button", { name: /^同步全部/ }));
+    await screen.findByText(/批量同步完成 · 1\/1 · 1 跳过/);
+    expect(screen.getByText(/仓库标记正在保存/)).toBeTruthy();
+    expect(api.sync).not.toHaveBeenCalled();
+    await act(async () => pending.resolve({ ...repo, syncDisabled: true }));
+    await screen.findByText("禁止同步 · 可抓取");
+    expect(
+      (screen.getByRole("button", { name: "同步此仓库" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("toggles a focused repository with Space without switching history, repeating or affecting other controls", async () => {
+    api.list.mockResolvedValue([repo, other]);
+    render(<App />);
+    await screen.findByText("100+");
+    fireEvent.click(row(other.name));
+    await waitFor(() =>
+      expect(api.history).toHaveBeenLastCalledWith(other.path, 100, false),
+    );
+    api.history.mockClear();
+    const target = row(other.name);
+    expect(document.activeElement).toBe(target);
+    expect(fireEvent.keyDown(target, { key: " " })).toBe(false);
+    fireEvent.keyUp(target, { key: " " });
+    expect(checkbox(other.name).checked).toBe(true);
+    fireEvent.keyDown(target, { key: " ", repeat: true });
+    expect(checkbox(other.name).checked).toBe(true);
+    fireEvent.keyDown(target, { key: " " });
+    expect(checkbox(other.name).checked).toBe(false);
+    fireEvent.keyDown(target, { key: " ", ctrlKey: true });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "搜索仓库" }), {
+      key: " ",
+    });
+    expect(checkbox(other.name).checked).toBe(false);
+    expect(api.history).not.toHaveBeenCalled();
+    expect(api.sync).not.toHaveBeenCalled();
+    expect(api.fetch).not.toHaveBeenCalled();
+  });
+
+  it("checks and unchecks a range in either direction from a fixed anchor", async () => {
+    api.list.mockResolvedValue([repo, other, third]);
+    render(<App />);
+    await screen.findByText("100+");
+    api.history.mockClear();
+    fireEvent.click(checkbox(repo.name));
+    fireEvent.click(checkbox(third.name), { shiftKey: true });
+    expect([repo, other, third].map((r) => checkbox(r.name).checked)).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    // A shifted click keeps the original anchor; clicking a checked endpoint clears the range.
+    fireEvent.click(checkbox(other.name), { shiftKey: true });
+    expect([repo, other, third].map((r) => checkbox(r.name).checked)).toEqual([
+      false,
+      false,
+      true,
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "清空选择" }));
+    fireEvent.click(checkbox(third.name));
+    fireEvent.click(checkbox(repo.name), { shiftKey: true });
+    expect(screen.getByText("已选 3 个")).toBeTruthy();
+    expect(api.history).not.toHaveBeenCalled();
+  });
+
+  it("uses a viewed row as the anchor for Shift-click and Shift-Space", async () => {
+    api.list.mockResolvedValue([repo, other, third]);
+    render(<App />);
+    await screen.findByText("100+");
+    fireEvent.click(row(repo.name));
+    fireEvent.click(row(third.name), { shiftKey: true });
+    expect(screen.getByText("已选 3 个")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "清空选择" }));
+    fireEvent.click(row(third.name));
+    fireEvent.keyDown(row(repo.name), { key: " ", shiftKey: true });
+    expect(screen.getByText("已选 3 个")).toBeTruthy();
+  });
+
+  it("ranges only over expanded filtered rows in display order and preserves hidden checks", async () => {
+    api.list.mockResolvedValue([repo, other, third]);
+    api.groups.mockResolvedValue([
+      { name: "工作", paths: [repo.path, third.path] },
+    ]);
+    render(<App />);
+    await screen.findByText("100+");
+    // Display order is repo, third, other rather than the underlying repository order.
+    fireEvent.click(checkbox(repo.name));
+    fireEvent.click(checkbox(third.name), { shiftKey: true });
+    expect(checkbox(other.name).checked).toBe(false);
+    expect(screen.getByText("已选 2 个")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /折叠分组 工作/ }));
+    // The hidden anchor must fall back to selecting only the clicked visible row.
+    fireEvent.click(checkbox(other.name), { shiftKey: true });
+    expect(screen.getByText("已选 3 个")).toBeTruthy();
+    expect(screen.getByText("（含 2 个隐藏项）")).toBeTruthy();
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索仓库" }), {
+      target: { value: "other" },
+    });
+    fireEvent.keyDown(row(other.name), { key: " ", shiftKey: true });
+    expect(screen.getByText("已选 2 个")).toBeTruthy();
+    expect(screen.getByText("（含 2 个隐藏项）")).toBeTruthy();
+  });
+
+  it("skips a collapsed group between two visible range endpoints", async () => {
+    api.list.mockResolvedValue([repo, other, third]);
+    api.groups.mockResolvedValue([
+      { name: "起点", paths: [repo.path] },
+      { name: "隐藏", paths: [other.path] },
+      { name: "终点", paths: [third.path] },
+    ]);
+    render(<App />);
+    await screen.findByText("100+");
+    fireEvent.click(screen.getByRole("button", { name: /折叠分组 隐藏/ }));
+    fireEvent.click(checkbox(repo.name));
+    fireEvent.click(checkbox(third.name), { shiftKey: true });
+    expect(screen.getByText("已选 2 个")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /展开分组 隐藏/ }));
+    expect(checkbox(other.name).checked).toBe(false);
+    expect(checkbox(repo.name).checked).toBe(true);
+    expect(checkbox(third.name).checked).toBe(true);
+  });
+
   it("keeps checked repositories separate from history and runs Fetch only for checked paths, including hidden ones", async () => {
     api.list.mockResolvedValue([repo, other, third]);
     api.fetch.mockImplementation(async (path: string) => ({ ...status, path }));
@@ -173,15 +501,15 @@ describe("repository groups and bulk actions", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "全选当前可见仓库" }));
     expect(screen.getByText("已选 2 个")).toBeTruthy();
     expect(api.history).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Fetch 所选" }));
-    await screen.findByText(/批量 Fetch完成 · 2\/2 · 2 成功/);
+    fireEvent.click(screen.getByRole("button", { name: "抓取所选" }));
+    await screen.findByText(/批量抓取完成 · 2\/2 · 2 成功/);
     expect(api.fetch.mock.calls.map((c) => c[0]).sort()).toEqual(
       [repo.path, other.path].sort(),
     );
     expect(api.sync).not.toHaveBeenCalled();
     expect(screen.getByText("已选 2 个")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "清空选择" }));
-    expect(screen.queryByRole("button", { name: "Fetch 所选" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "抓取所选" })).toBeNull();
   });
 
   it("selects a filtered group and excludes collapsed rows from visible select-all", async () => {
@@ -333,7 +661,7 @@ describe("repository groups and bulk actions", () => {
         .disabled,
     ).toBe(true);
     expect(
-      (screen.getByRole("button", { name: "Fetch 所选" }) as HTMLButtonElement)
+      (screen.getByRole("button", { name: "抓取所选" }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
     await act(async () =>
@@ -369,8 +697,8 @@ describe("repository groups and bulk actions", () => {
     await screen.findByText("100+");
     fireEvent.click(screen.getByRole("button", { name: `同步 ${repo.name}` }));
     fireEvent.click(screen.getByRole("checkbox", { name: "全选当前可见仓库" }));
-    fireEvent.click(screen.getByRole("button", { name: "Fetch 所选" }));
-    await screen.findByText(/批量 Fetch完成 · 2\/2 · 1 成功 · 1 跳过/);
+    fireEvent.click(screen.getByRole("button", { name: "抓取所选" }));
+    await screen.findByText(/批量抓取完成 · 2\/2 · 1 成功 · 1 跳过/);
     expect(api.fetch).toHaveBeenCalledTimes(1);
     expect(api.fetch).toHaveBeenCalledWith(other.path, undefined);
     await act(async () => finish(status));
@@ -405,7 +733,7 @@ describe("repository dialogs", () => {
     render(<App />);
     await screen.findByText("100+");
     api.history.mockClear();
-    menuAction("Fetch 此仓库", linked.name);
+    menuAction("抓取此仓库", linked.name);
     await waitFor(() =>
       expect(api.history).toHaveBeenCalledWith(repo.path, 100, false),
     );
@@ -469,7 +797,7 @@ describe("repository dialogs", () => {
     render(<App />);
     await screen.findByText("100+");
     expect(screen.queryByRole("button", { name: "在编辑器打开" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Fetch 此仓库" }));
+    fireEvent.click(screen.getByRole("button", { name: "抓取此仓库" }));
     fireEvent.click(screen.getByRole("button", { name: "当前仓库更多操作" }));
     const trigger = screen.getByRole("button", { name: "当前仓库更多操作" });
     fireEvent.pointerDown(trigger);
@@ -515,7 +843,7 @@ describe("repository dialogs", () => {
     });
     render(<App />);
     await screen.findByText("100+");
-    fireEvent.click(screen.getByRole("button", { name: "Fetch 全部" }));
+    fireEvent.click(screen.getByRole("button", { name: "抓取全部" }));
     await waitFor(() => expect(api.fetch).toHaveBeenCalledTimes(2));
     expect(api.sync).not.toHaveBeenCalled();
     await screen.findByText(/test-repo：fetch failed/);
@@ -770,6 +1098,105 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+it.each(["flags-first", "list-first"])(
+  "keeps an added repository and its selection when pin saving overlaps list reload (%s)",
+  async (order) => {
+    const added = {
+      ...repo,
+      path: "/test/added",
+      name: "added",
+      commonDir: "/test/added/.git",
+    };
+    const flag = deferred<Repo>();
+    const list = deferred<Repo[]>();
+    api.updateRepoFlags.mockReturnValueOnce(flag.promise);
+    api.add.mockResolvedValueOnce(added);
+    api.fetch.mockImplementation(async (path: string) => ({ ...status, path }));
+    render(<App />);
+    await screen.findByText("100+");
+    menuAction("置顶仓库");
+    api.list.mockReturnValueOnce(list.promise);
+    fireEvent.click(screen.getByRole("button", { name: "手动输入仓库路径" }));
+    const dialog = screen.getByRole("dialog", { name: "添加本地仓库" });
+    fireEvent.change(within(dialog).getByRole("textbox"), {
+      target: { value: added.path },
+    });
+    fireEvent.submit(dialog.querySelector("form")!);
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+    // The list was captured before the pin was saved. Either reply may arrive first.
+    if (order === "flags-first")
+      await act(async () => flag.resolve({ ...repo, pinned: true }));
+    await act(async () => list.resolve([repo, added]));
+    if (order === "list-first")
+      await act(async () => flag.resolve({ ...repo, pinned: true }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "添加本地仓库" })).toBeNull(),
+    );
+    expect(
+      screen
+        .getByRole("button", { name: /^查看仓库 added，/ })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(screen.getByRole("group", { name: "置顶仓库" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: "全选当前可见仓库" }));
+    expect(screen.getByText("已选 2 个")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "抓取所选" }));
+    await screen.findByText(/批量抓取完成 · 2\/2 · 2 成功/);
+    expect(api.fetch.mock.calls.map((c) => c[0]).sort()).toEqual(
+      [repo.path, added.path].sort(),
+    );
+  },
+);
+
+it.each(["flags-first", "list-first"])(
+  "removes stale checks and keeps synchronization prohibited when saving overlaps removal (%s)",
+  async (order) => {
+    const removed = {
+      ...repo,
+      path: "/test/removed",
+      name: "removed",
+      commonDir: "/test/removed/.git",
+    };
+    const flag = deferred<Repo>();
+    const list = deferred<Repo[]>();
+    api.list.mockResolvedValueOnce([repo, removed]);
+    api.updateRepoFlags.mockReturnValueOnce(flag.promise);
+    api.remove.mockResolvedValueOnce(undefined);
+    render(<App />);
+    await screen.findByText("100+");
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择仓库 removed" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /^查看仓库 removed，/ }),
+    );
+    menuAction("禁止同步（仍可抓取）");
+    api.list.mockReturnValueOnce(list.promise);
+    removeFromMenu(removed.name);
+    const dialog = screen.getByRole("dialog", { name: "移除仓库" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "从列表移除" }));
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+    if (order === "flags-first")
+      await act(async () => flag.resolve({ ...repo, syncDisabled: true }));
+    await act(async () => list.resolve([repo]));
+    if (order === "list-first")
+      await act(async () => flag.resolve({ ...repo, syncDisabled: true }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "移除仓库" })).toBeNull(),
+    );
+    expect(
+      screen.queryByRole("button", { name: /^查看仓库 removed，/ }),
+    ).toBeNull();
+    expect(screen.getByText("多选仓库")).toBeTruthy();
+    expect(screen.getByText("禁止同步 · 可抓取")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "同步此仓库" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: /^同步全部/ }));
+    await screen.findByText(/批量同步完成 · 1\/1 · 1 跳过/);
+    expect(api.sync).not.toHaveBeenCalled();
+  },
+);
 
 it.each(["success", "failure"])(
   "keeps a new add dialog and selection intact after an old %s",
